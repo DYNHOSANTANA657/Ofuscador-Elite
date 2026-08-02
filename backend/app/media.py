@@ -24,6 +24,27 @@ def _rate(value: object) -> float:
         return 0.0
 
 
+def _rational_text(value: object, fallback: float) -> str:
+    """Taxa de quadros como fração exata (ex.: 30000/1001) para o FFmpeg.
+
+    Passar 29.97002997 faz o FFmpeg reaproximar a fração e acumular desvio ao longo
+    de milhares de quadros; a fração original do contêiner não tem esse problema.
+    """
+    text = str(value or "").strip()
+    if "/" in text and _rate(text) > 0:
+        return text
+    fraction = Fraction(fallback).limit_denominator(1_000_000)
+    return f"{fraction.numerator}/{fraction.denominator}"
+
+
+def _stream_float(stream: dict[str, object], key: str) -> float:
+    try:
+        value = float(str(stream.get(key, "")))
+    except (TypeError, ValueError):
+        return 0.0
+    return value if math.isfinite(value) and value > 0 else 0.0
+
+
 def probe_video(path: Path) -> dict[str, object]:
     command = [find_binary("ffprobe"), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)]
     try:
@@ -53,6 +74,17 @@ def probe_video(path: Path) -> dict[str, object]:
     if width <= 0 or height <= 0 or fps <= 0:
         raise MediaError("Não foi possível identificar a resolução ou o FPS do vídeo.")
     variable_frame_rate = bool(avg_fps and nominal_fps and abs(avg_fps - nominal_fps) / max(avg_fps, nominal_fps) > 0.001)
+    frame_rate_rational = _rational_text(video.get("avg_frame_rate") if avg_fps else video.get("r_frame_rate"), fps)
+    video_duration = _stream_float(video, "duration")
+    if not video_duration:
+        # MKV e alguns MP4 não trazem duration por stream; o contêiner é a melhor estimativa.
+        video_duration = duration
+    try:
+        frame_count = int(str(video.get("nb_frames", "") or 0))
+    except (TypeError, ValueError):
+        frame_count = 0
+    if frame_count <= 0:
+        frame_count = int(round(video_duration * fps))
     transfer = str(video.get("color_transfer", "") or "").lower()
     primaries = str(video.get("color_primaries", "") or "").lower()
     hdr = transfer in {"smpte2084", "arib-std-b67"} or primaries == "bt2020"
@@ -83,6 +115,9 @@ def probe_video(path: Path) -> dict[str, object]:
         })
     return {
         "duration": duration,
+        "videoDuration": video_duration,
+        "frameCount": frame_count,
+        "frameRateRational": frame_rate_rational,
         "videoStreamIndex": int(video["index"]),
         "videoCodec": str(video.get("codec_name", "")),
         "width": width,
@@ -108,8 +143,9 @@ def safe_stem(filename: str) -> str:
     return stem[:120] or "video"
 
 
-def unique_output(directory: Path, filename: str, subtitles: bool = False) -> Path:
-    suffix = "-sem-legendas-processado" if subtitles else "-processado"
+def unique_output(directory: Path, filename: str, subtitles: bool = False, suffix: str | None = None) -> Path:
+    if suffix is None:
+        suffix = "-sem-legendas-processado" if subtitles else "-processado"
     base = safe_stem(filename) + suffix
     candidate = directory / f"{base}.mp4"
     counter = 2
@@ -149,6 +185,12 @@ def strip_subtitle_tracks_command(video: Path, output: Path, duration: float) ->
 
 
 def mux_clean_video_command(clean_video: Path, original: Path, output: Path, duration: float, remove_subtitles: bool = True) -> list[str]:
+    """Junta o vídeo já reconstruído com o áudio original, sem recodificar nada.
+
+    O parâmetro `duration` existe só para registro no log: com `-c:v copy` o `-t`
+    apenas corta e nunca estende, então um vídeo limpo levemente curto virava um
+    arquivo final curto. O vídeo reconstruído já tem a contagem exata de quadros.
+    """
     command = [
         find_binary("ffmpeg"), "-hide_banner", "-y", "-i", str(clean_video), "-i", str(original),
         "-map", "0:v:0", "-map", "1:a?",
@@ -157,7 +199,7 @@ def mux_clean_video_command(clean_video: Path, original: Path, output: Path, dur
         command += ["-sn"]
     else:
         command += ["-map", "1:s?", "-c:s", "copy"]
-    command += ["-c:v", "copy", "-c:a", "copy", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+    command += ["-c:v", "copy", "-c:a", "copy", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
     return command
 
 
@@ -189,7 +231,9 @@ def mux_clean_video_with_voice_command(
         command += ["-sn"]
     else:
         command += ["-map", "1:s?", "-c:s", "copy"]
-    command += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
+    # Sem `-t`: o `apad`/`atrim` acima já limita o áudio a `duration` e o vídeo
+    # reconstruído já tem a duração certa. `-t` só encurtaria o resultado.
+    command += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(output)]
     return command
 
 

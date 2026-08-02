@@ -8,7 +8,7 @@ type Voice = { shortName: string; displayName: string; gender: "Male" | "Female"
 type AudioTrack = { index: number; order: number; codec: string; channels: number; language: string; title: string };
 type SubtitleTrack = { index: number; order: number; codec: string; language: string; title: string; default: boolean; forced: boolean };
 type UploadInfo = { uploadId: string; filename: string; duration: number; size: number; audioTracks: AudioTrack[]; subtitleTracks: SubtitleTrack[]; resolution: { width: number; height: number }; fps: number; videoCodec: string; variableFrameRate: boolean; hdr: boolean };
-type Job = { id: string; status: string; progress: number; message: string; outputName?: string; error?: string };
+type Job = { id: string; status: string; progress: number; message: string; outputName?: string; error?: string; warning?: string };
 type ModelStatus = { installed: boolean; version?: string; status: string; progress: number; message: string; error?: string };
 type SubtitleRegion = { id: string; x: number; y: number; width: number; height: number; startMs: number; endMs: number; source: "automatic" | "manual"; enabled: boolean; text: string; confidence: number };
 type SubtitleScan = { id: string; uploadId: string; status: string; progress: number; message: string; fullScreen: boolean; regions: SubtitleRegion[]; sampleTimesMs: number[]; error?: string };
@@ -194,11 +194,8 @@ export function EliteApp() {
         setJob(next);
         if (["completed", "failed", "cancelled"].includes(next.status)) {
           window.clearInterval(timer);
-          if (next.status !== "completed") {
-            setVideo(null);
-            setUpload(null);
-            setAudioTrack(null);
-          }
+          // Numa falha o vídeo e a análise de legendas continuam válidos no servidor.
+          // Limpar tudo aqui obrigava a reenviar o arquivo e refazer o OCR do zero.
         }
       } catch (error) {
         setNotice(error instanceof Error ? error.message : "Não foi possível acompanhar o processamento.");
@@ -624,7 +621,7 @@ export function EliteApp() {
 
       <section className="action-panel">
         {usesAudio ? <div className="signal-summary"><div><span className="channel l">L</span><p><b>Original + voz</b><small>Canal esquerdo</small></p></div><i>→</i><div><span className="channel r">R</span><p><b>Original invertido + voz</b><small>Canal direito</small></p></div></div> : <div className="signal-summary subtitle-summary"><div><span className="channel l">CC</span><p><b>Legendas removidas</b><small>Todas as faixas de áudio originais serão preservadas</small></p></div></div>}
-        {job && <div className={`job-progress ${job.status}`}><div><span>{job.status === "completed" ? "Vídeo pronto" : job.status === "failed" ? "O processamento parou" : job.message}</span><b>{Math.round(job.progress)}%</b></div><progress value={job.progress} max="100"/>{job.error && <small>{job.error}</small>}</div>}
+        {job && <div className={`job-progress ${job.status}`}><div><span>{job.status === "completed" ? "Vídeo pronto" : job.status === "failed" ? "O processamento parou" : job.message}</span><b>{Math.round(job.progress)}%</b></div><progress value={job.progress} max="100"/>{job.error && <small>{job.error}</small>}{job.warning && <small className="job-warning">{job.warning}</small>}</div>}
         {job?.status === "completed" ? <div className="completion-actions"><a className="primary-action ready" href={`/api/jobs/${job.id}/download`}>↓ Baixar {job.outputName || "vídeo processado"}</a><button type="button" onClick={prepareNextVideo}>Processar outro vídeo</button></div> : <button className="primary-action" disabled={!canProcess} onClick={processVideo}>{jobActive ? "Processando…" : "Processar vídeo"}<span>→</span></button>}
         <p className="destination">O resultado será salvo em <b>{status.outputDirectory}</b></p>
       </section>

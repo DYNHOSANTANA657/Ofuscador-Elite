@@ -1,0 +1,118 @@
+name: Pacotes portáteis
+
+# Gera os ZIPs de Windows e macOS. O pacote macOS não pode ser criado a partir do
+# Windows — o PyInstaller não faz compilação cruzada — então este workflow é o
+# caminho para produzir o .app sem ter um Mac à mão.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Instalar FFmpeg com libx264
+        shell: pwsh
+        run: |
+          choco install ffmpeg-full -y --no-progress
+          $ffmpeg = (Get-Command ffmpeg).Source
+          if (-not (& $ffmpeg -hide_banner -encoders | Select-String -SimpleMatch "libx264")) {
+            throw "O FFmpeg instalado não contém libx264."
+          }
+          "FFMPEG_DIR=$(Split-Path -Parent $ffmpeg)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Instalar dependências Python
+        run: python -m pip install --disable-pip-version-check -r backend/requirements-build.txt
+
+      - name: Montar o pacote de IA
+        run: python scripts/build-subtitle-model-pack.py --download-lama
+
+      - name: Construir o pacote Windows
+        shell: pwsh
+        run: |
+          .\build-windows.ps1 `
+            -UseExistingEnvironment `
+            -PythonPath (Get-Command python).Source `
+            -FfmpegDirectory $env:FFMPEG_DIR `
+            -SubtitleModelUrl "$env:SUBTITLE_MODEL_URL" `
+            -SubtitleModelSha256 "$env:SUBTITLE_MODEL_SHA256"
+        env:
+          # Defina estes dois segredos depois de publicar o ZIP de IA na Hostinger.
+          # Vazios, o app aceita só o botão "Importar ZIP".
+          SUBTITLE_MODEL_URL: ${{ secrets.SUBTITLE_MODEL_URL }}
+          SUBTITLE_MODEL_SHA256: ${{ secrets.SUBTITLE_MODEL_SHA256 }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OfuscadorElite-Windows-x64
+          path: |
+            dist/OfuscadorElite-Windows-x64-*.zip
+            dist/OfuscadorElite-IA-Legendas-v1.zip
+            dist/SHA256SUMS.txt
+          retention-days: 14
+
+  macos:
+    # macos-14 é Apple Silicon. O runner não traz Rosetta 2 nem Python universal2,
+    # então só o pacote arm64 sai daqui (OFUSCADOR_SKIP_INTEL=1). Para o pacote
+    # Intel é preciso um Mac com Rosetta 2 instalado.
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.13"
+          cache: pnpm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Instalar dependências Python
+        run: python -m pip install --disable-pip-version-check -r backend/requirements-build.txt
+
+      - name: Montar o pacote de IA
+        run: python scripts/build-subtitle-model-pack.py --download-lama
+
+      - name: Construir o pacote macOS Apple Silicon
+        run: |
+          chmod +x ./build-macos.command
+          ./build-macos.command
+        env:
+          OFUSCADOR_SKIP_INTEL: "1"
+          PYTHON_BIN: python
+          OFUSCADOR_SUBTITLE_MODEL_URL: ${{ secrets.SUBTITLE_MODEL_URL }}
+          OFUSCADOR_SUBTITLE_MODEL_SHA256: ${{ secrets.SUBTITLE_MODEL_SHA256 }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OfuscadorElite-macOS-arm64
+          path: |
+            dist/OfuscadorElite-macOS-*.zip
+            dist/SHA256SUMS.txt
+          retention-days: 14

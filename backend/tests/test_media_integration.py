@@ -9,7 +9,13 @@ import pytest
 
 from app.azure import generate_diagnostic_wav
 from app.config import find_binary
-from app.media import ffmpeg_command, mux_clean_video_with_voice_command, probe_video, strip_subtitle_tracks_command
+from app.media import (
+    ffmpeg_command,
+    mux_clean_video_command,
+    mux_clean_video_with_voice_command,
+    probe_video,
+    strip_subtitle_tracks_command,
+)
 
 
 def run(command: list[str]) -> None:
@@ -133,6 +139,45 @@ def test_separate_subtitle_track_is_detected_and_removed_without_reencoding(tmp_
     assert after["subtitleTracks"] == []
     assert after["videoCodec"] == before["videoCodec"]
     assert after["audioTracks"][0]["codec"] == before["audioTracks"][0]["codec"]
+
+
+def make_longer_audio_video(path: Path) -> None:
+    """Vídeo de 3s com áudio de 3,4s — o contêiner passa a valer mais que o vídeo."""
+    run([
+        find_binary("ffmpeg"), "-hide_banner", "-y",
+        "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001:d=3",
+        "-f", "lavfi", "-i", "sine=frequency=220:duration=3.4",
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "libx264", "-preset", "ultrafast", "-bf", "3", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path),
+    ])
+
+
+def test_probe_separates_container_duration_from_video_duration(tmp_path: Path) -> None:
+    source = tmp_path / "audio-mais-longo.mp4"
+    make_longer_audio_video(source)
+    info = probe_video(source)
+    # É esta diferença que quebrava a verificação final: a antiga comparava a duração do
+    # vídeo reconstruído contra a duração do contêiner, que aqui é a da faixa de áudio.
+    assert float(info["duration"]) > float(info["videoDuration"]) + 0.2
+    assert int(info["frameCount"]) > 0
+    assert "/" in str(info["frameRateRational"])
+    assert abs(float(info["videoDuration"]) - int(info["frameCount"]) / float(info["fps"])) < 0.05
+
+
+def test_mux_clean_video_does_not_truncate_the_reconstructed_video(tmp_path: Path) -> None:
+    source = tmp_path / "origem.mp4"
+    clean = tmp_path / "limpo.mp4"
+    output = tmp_path / "final.mp4"
+    make_longer_audio_video(source)
+    info = probe_video(source)
+    run([find_binary("ffmpeg"), "-hide_banner", "-y", "-i", str(source), "-map", "0:v:0", "-an", "-c:v", "copy", str(clean)])
+    # Passar a duração do contêiner aqui era o que encurtava o resultado: com `-c:v copy`
+    # o `-t` só corta. O comando precisa ignorar esse valor.
+    run(mux_clean_video_command(clean, source, output, float(info["duration"])))
+    final = probe_video(output)
+    assert int(final["frameCount"]) == int(info["frameCount"])
+    assert abs(float(final["videoDuration"]) - float(info["videoDuration"])) < 0.05
+    assert "-t" not in mux_clean_video_command(clean, source, output, float(info["duration"]))
 
 
 def test_combined_clean_video_keeps_antiphase_mix(tmp_path: Path) -> None:

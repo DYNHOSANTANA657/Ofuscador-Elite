@@ -7,8 +7,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from app.config import find_binary
+from app.media import probe_video
 from app.subtitle_models import SubtitleModelManager, _safe_member
-from app.subtitle_processing import SubtitleFrameCleaner, regions_at
+from app.subtitle_processing import SubtitleFrameCleaner, regions_at, remove_burned_subtitles
 from app.subtitles import validate_region
 
 
@@ -43,6 +45,33 @@ def test_model_import_rejects_malicious_zip(tmp_path: Path) -> None:
 class NoModelNeeded:
     def models_dir(self):
         return None
+
+
+def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
+    """Nenhum quadro pode se perder entre a leitura e a regravação.
+
+    Antes a leitura era feita pelo OpenCV e a gravação pelo FFmpeg; cada quadro que o
+    OpenCV não devolvia encurtava o resultado e derrubava a verificação final.
+    A região fica fora da janela de tempo do vídeo de propósito: assim o caminho de
+    quadros é exercitado sem exigir o pacote de IA instalado.
+    """
+    import subprocess
+
+    source = tmp_path / "origem.mp4"
+    destination = tmp_path / "limpo.mp4"
+    subprocess.run([
+        find_binary("ffmpeg"), "-hide_banner", "-y",
+        "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001:d=4",
+        "-c:v", "libx264", "-preset", "ultrafast", "-bf", "3", "-g", "250", "-pix_fmt", "yuv420p", str(source),
+    ], capture_output=True, timeout=120, check=True)
+    info = probe_video(source)
+    far_future = {"x": 0.1, "y": 0.8, "width": 0.5, "height": 0.1, "startMs": 10_000_000, "endMs": 10_001_000, "enabled": True}
+    stats = remove_burned_subtitles(source, destination, info, [far_future], NoModelNeeded())
+
+    assert int(stats["frames"]) == int(info["frameCount"])
+    result = probe_video(destination)
+    assert int(result["frameCount"]) == int(info["frameCount"])
+    assert abs(float(result["videoDuration"]) - float(info["videoDuration"])) < 0.05
 
 
 def test_temporal_recovery_changes_only_mask_area() -> None:

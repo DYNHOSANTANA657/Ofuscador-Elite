@@ -6,6 +6,10 @@ BUILD_ROOT="$PROJECT_ROOT/.build-macos"
 DIST_ROOT="$PROJECT_ROOT/dist"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VERSION="1.3.0"
+# Runners macOS do GitHub Actions não trazem Rosetta 2 nem um Python universal2,
+# então o pacote Intel não pode ser gerado lá. Com OFUSCADOR_SKIP_INTEL=1 o
+# construtor entrega só o arm64 em vez de abortar.
+SKIP_INTEL="${OFUSCADOR_SKIP_INTEL:-0}"
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
   echo "Este construtor deve ser executado em um Mac Apple Silicon."
@@ -15,14 +19,19 @@ if [[ -e "$BUILD_ROOT" ]]; then
   echo "A pasta temporária $BUILD_ROOT já existe. Renomeie ou remova antes de reconstruir."
   exit 1
 fi
-for zip_name in "OfuscadorElite-macOS-arm64-v$VERSION.zip" "OfuscadorElite-macOS-x64-v$VERSION.zip"; do
+zip_names=("OfuscadorElite-macOS-arm64-v$VERSION.zip")
+if [[ "$SKIP_INTEL" != "1" ]]; then
+  zip_names+=("OfuscadorElite-macOS-x64-v$VERSION.zip")
+fi
+for zip_name in "${zip_names[@]}"; do
   if [[ -e "$DIST_ROOT/$zip_name" ]]; then
     echo "$DIST_ROOT/$zip_name já existe e não será substituído."
     exit 1
   fi
 done
-if ! /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+if [[ "$SKIP_INTEL" != "1" ]] && ! /usr/bin/arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
   echo "Rosetta 2 não está disponível. Instale com: softwareupdate --install-rosetta"
+  echo "Para gerar somente o pacote Apple Silicon, use OFUSCADOR_SKIP_INTEL=1."
   exit 1
 fi
 if ! "$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3,11)' >/dev/null; then
@@ -31,8 +40,13 @@ if ! "$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3,11)' >/dev/null
 fi
 PYTHON_EXEC="$($PYTHON_BIN -c 'import sys; print(sys.executable)')"
 PYTHON_FILE="$(file "$PYTHON_EXEC")"
-if [[ "$PYTHON_FILE" != *"arm64"* || "$PYTHON_FILE" != *"x86_64"* ]]; then
+if [[ "$PYTHON_FILE" != *"arm64"* ]]; then
+  echo "O Python informado não contém a arquitetura arm64."
+  exit 1
+fi
+if [[ "$SKIP_INTEL" != "1" && "$PYTHON_FILE" != *"x86_64"* ]]; then
   echo "Use o instalador universal2 do Python 3.12, que contém arm64 e x86_64."
+  echo "Para gerar somente o pacote Apple Silicon, use OFUSCADOR_SKIP_INTEL=1."
   exit 1
 fi
 
@@ -74,24 +88,27 @@ download_binary() {
 
 download_binary "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" "$BUILD_ROOT/bin/arm64/ffmpeg"
 download_binary "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffprobe.zip" "$BUILD_ROOT/bin/arm64/ffprobe"
-download_binary "https://evermeet.cx/ffmpeg/getrelease/zip" "$BUILD_ROOT/bin/x64/ffmpeg"
-download_binary "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" "$BUILD_ROOT/bin/x64/ffprobe"
 
 file "$BUILD_ROOT/bin/arm64/ffmpeg" | grep -q arm64
 file "$BUILD_ROOT/bin/arm64/ffprobe" | grep -q arm64
-file "$BUILD_ROOT/bin/x64/ffmpeg" | grep -q x86_64
-file "$BUILD_ROOT/bin/x64/ffprobe" | grep -q x86_64
 "$BUILD_ROOT/bin/arm64/ffmpeg" -version >/dev/null
-/usr/bin/arch -x86_64 "$BUILD_ROOT/bin/x64/ffmpeg" -version >/dev/null
 "$BUILD_ROOT/bin/arm64/ffmpeg" -hide_banner -encoders 2>&1 | grep -q libx264
-/usr/bin/arch -x86_64 "$BUILD_ROOT/bin/x64/ffmpeg" -hide_banner -encoders 2>&1 | grep -q libx264
 
 "$PYTHON_EXEC" -m venv "$BUILD_ROOT/venv-arm64"
-/usr/bin/arch -x86_64 "$PYTHON_EXEC" -m venv "$BUILD_ROOT/venv-x64"
 ARM_PYTHON="$BUILD_ROOT/venv-arm64/bin/python"
-X64_PYTHON="$BUILD_ROOT/venv-x64/bin/python"
 "$ARM_PYTHON" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/backend/requirements-build.txt"
-/usr/bin/arch -x86_64 "$X64_PYTHON" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/backend/requirements-build.txt"
+
+if [[ "$SKIP_INTEL" != "1" ]]; then
+  download_binary "https://evermeet.cx/ffmpeg/getrelease/zip" "$BUILD_ROOT/bin/x64/ffmpeg"
+  download_binary "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" "$BUILD_ROOT/bin/x64/ffprobe"
+  file "$BUILD_ROOT/bin/x64/ffmpeg" | grep -q x86_64
+  file "$BUILD_ROOT/bin/x64/ffprobe" | grep -q x86_64
+  /usr/bin/arch -x86_64 "$BUILD_ROOT/bin/x64/ffmpeg" -version >/dev/null
+  /usr/bin/arch -x86_64 "$BUILD_ROOT/bin/x64/ffmpeg" -hide_banner -encoders 2>&1 | grep -q libx264
+  /usr/bin/arch -x86_64 "$PYTHON_EXEC" -m venv "$BUILD_ROOT/venv-x64"
+  X64_PYTHON="$BUILD_ROOT/venv-x64/bin/python"
+  /usr/bin/arch -x86_64 "$X64_PYTHON" -m pip install --disable-pip-version-check -r "$PROJECT_ROOT/backend/requirements-build.txt"
+fi
 
 build_arch() {
   local arch="$1" target="$2" binary_dir="$BUILD_ROOT/bin/$1" package_dir="$BUILD_ROOT/package-$1"
@@ -129,7 +146,11 @@ build_arch() {
 }
 
 build_arch arm64 arm64
-build_arch x64 x86_64
+if [[ "$SKIP_INTEL" != "1" ]]; then
+  build_arch x64 x86_64
+else
+  echo "OFUSCADOR_SKIP_INTEL=1: o pacote Intel não foi gerado."
+fi
 SUMS_TMP="$DIST_ROOT/.SHA256SUMS.txt.partial"
 : > "$SUMS_TMP"
 for artifact in \

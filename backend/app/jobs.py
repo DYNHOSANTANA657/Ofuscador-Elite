@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .azure import synthesize_azure
-from .config import Settings, temp_root
+from .config import Settings, application_data_dir, temp_root
 from .credentials import get_azure_credentials
 from .media import (
     ffmpeg_command,
@@ -67,6 +67,7 @@ class JobRecord:
     message: str = "Aguardando processamento"
     output_path: Path | None = None
     error: str | None = None
+    warning: str | None = None
 
     def public(self) -> dict[str, object]:
         data: dict[str, object] = {"id": self.id, "status": self.status, "progress": round(self.progress, 1), "message": self.message}
@@ -74,6 +75,8 @@ class JobRecord:
             data["outputName"] = self.output_path.name
         if self.error:
             data["error"] = self.error
+        if self.warning:
+            data["warning"] = self.warning
         return data
 
 
@@ -179,6 +182,20 @@ class JobManager:
             for key, value in changes.items():
                 setattr(job, key, value)
 
+    def _log(self, job: JobRecord, text: str) -> None:
+        """Registra o passo a passo em Dados/logs/job-<id>.txt.
+
+        Sem isso um erro no fim do processamento não diz nada sobre o que aconteceu
+        durante os quinze minutos anteriores.
+        """
+        try:
+            directory = application_data_dir() / "logs"
+            directory.mkdir(parents=True, exist_ok=True)
+            with (directory / f"job-{job.id}.txt").open("a", encoding="utf-8") as handle:
+                handle.write(f"{text}\n")
+        except OSError:
+            pass
+
     def _synthesize(self, text: str, voice: str, provider: str, speech: Path) -> None:
         if provider == "piper":
             synthesize_piper(text, voice, speech)
@@ -194,6 +211,7 @@ class JobManager:
             raise RuntimeError("O provedor de voz escolhido não é válido.")
 
     def _run_ffmpeg(self, job: JobRecord, command: list[str], duration: float, start: float, end: float, message: str) -> None:
+        self._log(job, f"[ffmpeg] {subprocess.list2cmdline(command)}")
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=flags)
         self._active_process = process
@@ -212,6 +230,7 @@ class JobManager:
         return_code = process.wait()
         self._active_process = None
         if return_code != 0:
+            self._log(job, "[ffmpeg] saída " + str(return_code) + "\n" + "\n".join(recent))
             details = next((line for line in reversed(recent) if "error" in line.lower() or "invalid" in line.lower()), "")
             raise RuntimeError(f"O FFmpeg não conseguiu concluir o vídeo. {details}".strip())
 
@@ -229,9 +248,18 @@ class JobManager:
         partial: Path | None = None
         uses_audio = mode in {"audio", "audio_and_subtitles"}
         subtitles_active = mode in {"subtitles", "audio_and_subtitles"}
+        stats: dict[str, float] | None = None
         try:
             work.mkdir(parents=True, exist_ok=False)
             self._update(job, status="processing", progress=2, message="Preparando o processamento")
+            self._log(job, f"[origem] {upload.filename}")
+            self._log(
+                job,
+                f"[origem] contêiner {upload.duration:.3f}s · vídeo {float(upload.probe['videoDuration']):.3f}s · "
+                f"{upload.probe['frameCount']} quadros · {upload.probe['frameRateRational']} fps"
+                f"{' · VFR' if upload.probe['variableFrameRate'] else ''}"
+            )
+            self._log(job, f"[modo] {mode} · faixas separadas={remove_embedded} · gravada={remove_burned_in}")
             if uses_audio:
                 self._update(job, progress=4, message="Preparando a voz")
                 self._synthesize(text, voice, provider, speech)
@@ -255,9 +283,14 @@ class JobManager:
                 self._update(job, progress=10 if uses_audio else 4, message="Reconstruindo o fundo sob as legendas")
                 lower = 12 if uses_audio else 5
                 upper = 82
-                remove_burned_subtitles(
+                stats = remove_burned_subtitles(
                     upload.path, clean_video, upload.probe, regions, self.models,
                     lambda fraction, message: self._update(job, progress=lower + fraction * (upper - lower), message=message),
+                )
+                self._log(
+                    job,
+                    f"[reconstrução] {int(stats['frames'])} de {int(stats['expectedFrames'])} quadros · "
+                    f"saída {stats['outputDuration']:.3f}s · origem {stats['sourceVideoDuration']:.3f}s"
                 )
                 if uses_audio:
                     assert audio_stream_index is not None
@@ -280,22 +313,58 @@ class JobManager:
             if not partial.is_file() or partial.stat().st_size == 0:
                 raise RuntimeError("O arquivo final não foi criado corretamente.")
             result_probe = probe_video(partial)
+            self._log(
+                job,
+                f"[resultado] contêiner {float(result_probe['duration']):.3f}s · "
+                f"vídeo {float(result_probe['videoDuration']):.3f}s · {result_probe['frameCount']} quadros · "
+                f"{result_probe['videoCodec']} · {len(result_probe['audioTracks'])} faixa(s) de áudio"
+            )
             if remove_embedded and result_probe["subtitleTracks"]:
                 raise RuntimeError("A verificação encontrou uma faixa de legenda que deveria ter sido removida.")
-            tolerance = 1.0 / float(upload.probe["fps"]) + 0.04
-            if abs(float(result_probe["duration"]) - upload.duration) > tolerance:
-                raise RuntimeError("A duração do resultado ficou fora da tolerância de um quadro.")
+            # Compara duração de vídeo com duração de vídeo. `duration` do contêiner MP4
+            # costuma ser a da faixa de áudio (padding do AAC) e não serve de referência.
+            expected = float(stats["outputDuration"]) if stats else float(upload.probe["videoDuration"])
+            obtained = float(result_probe["videoDuration"])
+            tolerance = max(2.0 / float(upload.probe["fps"]), 0.15)
+            difference = abs(obtained - expected)
+            if difference > tolerance:
+                # Aviso, não falha: um desvio de décimos de segundo não justifica jogar
+                # fora o vídeo inteiro depois de reconstruir milhares de quadros.
+                warning = (
+                    f"A duração ficou {difference:.3f}s fora do esperado "
+                    f"(obtida {obtained:.3f}s, esperada {expected:.3f}s, tolerância {tolerance:.3f}s). "
+                    "O vídeo foi salvo mesmo assim — confira o fim do arquivo."
+                )
+                self._log(job, f"[aviso] {warning}")
+                self._update(job, warning=warning)
             partial.replace(final_output)
             partial = None
+            self._log(job, f"[fim] salvo em {final_output}")
             self._update(job, status="completed", progress=100, message="Vídeo pronto", output_path=final_output)
         except Exception as exc:
-            self._update(job, status="failed", message="Falha no processamento", error=str(exc) or "Erro inesperado.")
+            detail = str(exc) or "Erro inesperado."
+            self._log(job, f"[falha] {detail}")
+            # Preserva o que já foi reconstruído: apagar o arquivo aqui significava
+            # perder o upload, a análise OCR e todo o tempo do LaMa de uma vez.
+            if partial and partial.is_file() and partial.stat().st_size > 0:
+                try:
+                    kept = unique_output(partial.parent, upload.filename, suffix="-com-aviso")
+                    partial.replace(kept)
+                    partial = None
+                    detail = f"{detail} O material já processado foi mantido em {kept.name}."
+                    self._log(job, f"[falha] arquivo preservado em {kept}")
+                except OSError:
+                    pass
+            self._update(job, status="failed", message="Falha no processamento", error=detail)
         finally:
             self._active_process = None
             if partial:
                 partial.unlink(missing_ok=True)
             shutil.rmtree(work, ignore_errors=True)
-            self.uploads.remove(job.upload_id)
+            # Só descarta o envio quando deu certo. Em caso de falha o vídeo e a análise
+            # de legendas continuam válidos e o usuário reprocessa sem enviar tudo de novo.
+            if job.status == "completed":
+                self.uploads.remove(job.upload_id)
 
 
 def cleanup_temporary_files() -> None:

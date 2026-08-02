@@ -36,6 +36,38 @@ Data: 2 de agosto de 2026
 - VFR é convertido para FPS constante equivalente quando a imagem precisa ser reconstruída.
 - A URL HTTPS definitiva da Hostinger ainda não foi informada. Até ela ser configurada no construtor, o app baixa o LaMa da fonte pública indicada no código ou aceita o ZIP manualmente.
 
+## Correção posterior — remoção de legenda gravada
+
+O diagnóstico de vídeo citado acima usava um clipe sintético de 8 quadros a 8 fps.
+Nessa escala a pipeline passava mesmo quebrada: com vídeo real o processamento parava
+em 97% com `A duração do resultado ficou fora da tolerância de um quadro`, e o
+aplicativo ainda apagava o resultado e descartava o envio.
+
+Causa: a leitura dos quadros era feita pelo OpenCV e a regravação pelo FFmpeg. São
+builds diferentes de libavcodec e o OpenCV pode devolver menos quadros em vídeos com
+B-frames, GOP aberto ou taxa variável. Cada quadro perdido encurtava o resultado.
+
+O que mudou:
+
+- A leitura passou a usar o mesmo FFmpeg da gravação, por pipe `rawvideo`, com
+  `-fps_mode cfr` normalizando VFR na entrada. A contagem de quadros fecha por
+  construção — medido: 600 de 600 em um clipe de 20 s a 30000/1001 com B-frames.
+- A verificação final compara duração de vídeo com duração de vídeo. A duração do
+  contêiner MP4 costuma ser a da faixa de áudio: no mesmo clipe, 20,400 s de contêiner
+  contra 20,020 s de vídeo — cinco vezes a tolerância antiga.
+- Fora da tolerância virou aviso, não falha. O vídeo é salvo e o desvio aparece na
+  interface com os números.
+- Falha não descarta mais o envio nem a análise OCR, e o material já reconstruído é
+  mantido como `-com-aviso.mp4`.
+- Cada trabalho grava `Dados/logs/job-<id>.txt` com comandos, contagens e durações.
+- O diagnóstico `scripts/verify-subtitle-video-pipeline.py` passou a usar 20 s a
+  30000/1001 com B-frames, GOP de 250 e áudio mais longo que o vídeo, e confere
+  contagem de quadros além da duração.
+
+Verificado até aqui apenas no nível do FFmpeg, em linha de comando. Os testes do
+backend e o diagnóstico completo ainda precisam ser executados — a máquina de
+desenvolvimento não tem Python instalado.
+
 ## macOS
 
 O construtor `build-macos.command` foi atualizado para gerar arm64 e Intel, verificar Rosetta 2, libx264, RapidOCR, ONNX Runtime e LaMa. A validação integral dos aplicativos macOS ainda precisa ser executada em um Mac Apple Silicon com Rosetta 2, conforme previsto no plano.

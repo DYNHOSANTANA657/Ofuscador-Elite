@@ -42,8 +42,16 @@ Os comandos `pnpm run dev`, `pnpm run build` e `pnpm run start` funcionam em Win
 ## Pacotes portáteis
 
 - `build-windows.ps1`: cria o ZIP Windows x64 com Python, Piper, RapidOCR, ONNX Runtime, FFmpeg e FFprobe incluídos.
-- `build-macos.command`: em um Mac Apple Silicon com Python universal2 e Rosetta 2, cria os pacotes arm64 e Intel.
+- `build-macos.command`: em um Mac Apple Silicon com Python universal2 e Rosetta 2, cria os pacotes arm64 e Intel. Com `OFUSCADOR_SKIP_INTEL=1` gera somente o arm64, sem exigir Rosetta 2 nem Python universal2.
 - `scripts/build-subtitle-model-pack.py`: cria `OfuscadorElite-IA-Legendas-v1.zip` e atualiza `SHA256SUMS.txt`.
+- `.github/workflows/build.yml`: compila Windows e macOS na nuvem. É o caminho para gerar o `.app` sem ter um Mac, já que o PyInstaller não faz compilação cruzada.
+
+## Site de download
+
+`site/` contém a página estática publicada por FTP na Hostinger, com os links dos
+pacotes e os SHA-256. Ela é independente da interface do aplicativo: `app/page.tsx`
+renderiza o `EliteApp`, que sem o backend local só mostra o modo de apresentação.
+As instruções de publicação estão em `site/LEIA-ME-PUBLICACAO.txt`.
 
 Os modelos de legenda são instalados somente na primeira ativação ou importados pelo ZIP. A publicação na Hostinger usa apenas HTTPS público; nenhuma credencial FTP entra no aplicativo.
 

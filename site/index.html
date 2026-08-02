@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ofuscador Elite — processamento local de vídeo e áudio</title>
+<meta name="description" content="Aplicativo portátil para Windows e macOS que gera voz em português, aplica antifase no áudio e remove legendas de vídeos MP4. Todo o processamento acontece no seu computador.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<style>
+:root{--ink:#101826;--muted:#647083;--line:#dfe4e9;--paper:#f4f6f7;--green:#0f6f5d;--green-dark:#0a5146;--mint:#d8f2e9;--lime:#68d8a8;--card:#fff}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);background:var(--paper);font-family:Inter,"Segoe UI",-apple-system,BlinkMacSystemFont,sans-serif;line-height:1.6}
+a{color:var(--green)}
+.wrap{max-width:960px;margin:0 auto;padding:0 20px}
+header{background:var(--green);color:#fff;padding:14px 0}
+header .wrap{display:flex;align-items:center;gap:10px}
+header b{letter-spacing:.14em;font-size:14px}
+header em{font-style:normal;opacity:.75;font-size:14px}
+.hero{padding:60px 0 40px;text-align:center}
+.hero h1{font-size:clamp(30px,6vw,50px);line-height:1.1;margin:0 0 14px}
+.hero h1 span{color:var(--green)}
+.hero p{color:var(--muted);max-width:620px;margin:0 auto;font-size:17px}
+.badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:22px}
+.badge{background:var(--mint);color:var(--green-dark);border-radius:999px;padding:5px 14px;font-size:13px;font-weight:600}
+.downloads{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:18px;margin:34px 0 10px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+.card h2{margin:0 0 4px;font-size:19px}
+.card .meta{color:var(--muted);font-size:13px;margin:0 0 18px}
+.btn{display:block;text-align:center;background:var(--green);color:#fff;text-decoration:none;font-weight:700;padding:13px;border-radius:9px}
+.btn:hover{background:var(--green-dark)}
+.btn.secondary{background:var(--mint);color:var(--green-dark)}
+.btn.disabled{background:#e7ebee;color:#9aa5b1;pointer-events:none}
+.hash{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--muted);word-break:break-all;margin-top:12px;display:block}
+section{padding:34px 0;border-top:1px solid var(--line)}
+section h2{font-size:22px;margin:0 0 16px}
+ol,ul{padding-left:20px;margin:0}
+li{margin-bottom:8px}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:26px}
+.note{background:#fff8e6;border:1px solid #f0dfae;border-radius:10px;padding:16px 18px;font-size:14px}
+.note b{display:block;margin-bottom:4px}
+code{background:#eceff1;border-radius:4px;padding:1px 5px;font-size:13px}
+footer{border-top:1px solid var(--line);padding:26px 0 44px;color:var(--muted);font-size:13px}
+</style>
+</head>
+<body>
+
+<header><div class="wrap"><b>OFUSCADOR</b><em>ELITE</em></div></header>
+
+<div class="wrap">
+
+  <div class="hero">
+    <h1>Seu vídeo. Sua voz.<br><span>No seu computador.</span></h1>
+    <p>Gera fala em português do Brasil, aplica antifase no áudio original e remove legendas de arquivos MP4. O vídeo nunca sai da sua máquina e o arquivo original nunca é alterado.</p>
+    <div class="badges">
+      <span class="badge">Sem conta</span>
+      <span class="badge">Sem mensalidade</span>
+      <span class="badge">Funciona offline</span>
+      <span class="badge">Versão 1.3.0</span>
+    </div>
+  </div>
+
+  <div class="downloads">
+    <div class="card">
+      <h2>Windows 10/11 · 64 bits</h2>
+      <p class="meta">ZIP portátil · 256 MB · não precisa instalar</p>
+      <a class="btn" href="arquivos/OfuscadorElite-Windows-x64-v1.3.0.zip">Baixar para Windows</a>
+      <span class="hash">SHA-256<br>7101A75014AFFB8AE29E1AE8B9495F9ECE4379F63A58DFDDCE5E0F05C35A4558</span>
+    </div>
+    <div class="card">
+      <h2>macOS</h2>
+      <p class="meta">Apple Silicon e Intel</p>
+      <a class="btn disabled" href="#">Em preparação</a>
+      <span class="hash">O pacote macOS será publicado aqui assim que a compilação em um Mac for concluída.</span>
+    </div>
+    <div class="card">
+      <h2>Pacote de IA para legendas</h2>
+      <p class="meta">Opcional · 207 MB · só para legenda gravada na imagem</p>
+      <a class="btn secondary" href="arquivos/OfuscadorElite-IA-Legendas-v1.zip">Baixar pacote de IA</a>
+      <span class="hash">SHA-256<br>E655D34870D18A1F6535A61D14C93D807A982CCA8DE78231B2135149D9C6774D</span>
+    </div>
+  </div>
+
+  <p style="text-align:center"><a href="arquivos/SHA256SUMS.txt">Ver todos os códigos de verificação (SHA256SUMS.txt)</a></p>
+
+  <section>
+    <h2>Como instalar</h2>
+    <div class="cols">
+      <div>
+        <h3 style="font-size:16px;margin:0 0 8px">Windows</h3>
+        <ol>
+          <li>Extraia todo o conteúdo do ZIP em uma pasta.</li>
+          <li>Abra a pasta <code>OfuscadorElite</code>.</li>
+          <li>Clique duas vezes em <code>OfuscadorElite.exe</code>.</li>
+          <li>Escolha <b>Abrir somente neste computador</b>. O navegador abre sozinho.</li>
+        </ol>
+      </div>
+      <div>
+        <h3 style="font-size:16px;margin:0 0 8px">macOS</h3>
+        <ol>
+          <li>Extraia o ZIP correspondente ao seu Mac.</li>
+          <li>Na primeira abertura, use <b>Control + clique</b> em <code>OfuscadorElite.app</code> e escolha <b>Abrir</b>.</li>
+          <li>Confirme <b>Abrir</b> na caixa de aviso.</li>
+        </ol>
+        <p style="font-size:13px;color:var(--muted)">Os pacotes não possuem assinatura nem notarização da Apple, por isso o aviso aparece.</p>
+      </div>
+    </div>
+    <div class="note" style="margin-top:22px">
+      <b>Mantenha a janela do aplicativo aberta</b>
+      A interface roda no navegador, mas quem processa é o programa. Fechar a janela interrompe o trabalho.
+    </div>
+  </section>
+
+  <section>
+    <h2>O que o aplicativo faz</h2>
+    <ul>
+      <li><b>Voz local gratuita.</b> O Piper gera fala real no próprio computador, sem chave, conta, internet ou limite mensal. Inclui a voz masculina brasileira Faber.</li>
+      <li><b>Azure Speech opcional.</b> Mais vozes, inclusive femininas. A chave fica no Gerenciador de Credenciais do Windows ou nas Chaves do macOS, nunca em arquivo de texto.</li>
+      <li><b>Antifase no áudio.</b> Faixa estéreo com o original à esquerda, o original invertido à direita e a voz gerada em fase nos dois canais.</li>
+      <li><b>Remoção de faixas de legenda separadas</b> sem recodificar vídeo nem áudio.</li>
+      <li><b>Remoção de legenda gravada na imagem</b> com OCR local, revisão manual das áreas e reconstrução do fundo com LaMa — tudo no seu computador, sem enviar o vídeo para lugar nenhum.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Antes de usar, saiba disto</h2>
+    <ul>
+      <li>A IA <b>estima</b> o fundo que estava escondido atrás da legenda. Ela não recupera pixels que não existem em nenhum quadro.</li>
+      <li>Se o modelo falhar, o aplicativo para. Ele nunca disfarça a falha com borrão ou corte.</li>
+      <li>Vídeo HDR está bloqueado na remoção de legenda gravada nesta versão, para não alterar as cores.</li>
+      <li>A antifase pode se cancelar quando o áudio é convertido para mono e pode mudar após recodificação. O resultado não garante comportamento específico em plataformas ou serviços de transcrição.</li>
+      <li>Limite de 2 GB por vídeo MP4.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Licenças</h2>
+    <p style="color:var(--muted);font-size:14px">O aplicativo distribui componentes de terceiros. Os textos completos acompanham cada pacote, na pasta <code>Licencas</code>.</p>
+    <ul>
+      <li>FFmpeg — GPLv3</li>
+      <li>Piper — GPLv3</li>
+      <li>Voz pt-BR Faber — CC0</li>
+      <li>RapidOCR e LaMa — Apache 2.0 / MIT</li>
+    </ul>
+  </section>
+
+</div>
+
+<footer><div class="wrap">Ofuscador Elite 1.3.0 — todo o processamento de vídeo e áudio acontece no computador de quem usa.</div></footer>
+
+</body>
+</html>
