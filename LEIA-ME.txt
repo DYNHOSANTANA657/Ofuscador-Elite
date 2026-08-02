@@ -1,0 +1,59 @@
+OFUSCADOR ELITE 1.3.0
+===================
+
+O aplicativo processa vídeo e áudio inteiramente no computador onde está aberto.
+Ele nunca modifica o vídeo original.
+
+PRÉVIA DE VOZ
+- Mantenha a janela do Ofuscador Elite aberta enquanto usa a interface no navegador.
+- A Azure precisa de internet. Se a conexão oscilar, o aplicativo tenta novamente uma vez.
+- O Piper local funciona sem internet e pode ser usado quando a Azure estiver indisponível.
+
+WINDOWS
+1. Extraia todo o arquivo ZIP.
+2. Abra a pasta OfuscadorElite.
+3. Clique duas vezes em OfuscadorElite.exe.
+4. Escolha “Abrir somente neste computador”.
+
+macOS
+1. Extraia o ZIP correspondente ao seu Mac.
+2. Na primeira abertura, use Control + clique em OfuscadorElite.app e escolha Abrir.
+3. Confirme Abrir. Os pacotes desta versão não possuem assinatura ou notarização.
+
+VOZ LOCAL GRATUITA
+O Piper é a opção padrão e gera fala real no próprio computador, sem chave, conta,
+internet, limite mensal ou cobrança. O pacote inclui a voz masculina brasileira Faber.
+
+VOZ AZURE OPCIONAL
+Abra a engrenagem somente se quiser cadastrar a chave e a região do Azure Speech.
+A Azure oferece mais vozes, inclusive femininas, e pode soar mais natural.
+A chave fica no Gerenciador de Credenciais do Windows ou nas Chaves do macOS.
+
+PRÉVIA DA VOZ
+Depois de digitar o texto, clique em “Ouvir prévia”. O aplicativo tenta iniciar o
+áudio e também mostra os botões “Reproduzir” e “Baixar prévia WAV”. Alguns
+navegadores exigem que você clique em Reproduzir por segurança.
+
+SAÍDAS
+Windows: pasta Saidas ao lado do aplicativo.
+macOS: ~/Movies/OfuscadorElite/Saidas.
+O destino pode ser alterado nas configurações.
+
+REMOÇÃO LOCAL DE LEGENDAS
+- Escolha Áudio, Legendas ou Áudio + legendas depois de selecionar o vídeo.
+- Faixas de legenda separadas são removidas sem recodificar vídeo ou áudio.
+- Para legenda gravada na imagem, instale uma vez o pacote gratuito
+  OfuscadorElite-IA-Legendas-v1.zip, examine o vídeo, revise as caixas e gere a prévia.
+- A análise usa RapidOCR e a reconstrução usa quadros vizinhos e LaMa no computador.
+- Também é possível importar o ZIP de IA manualmente quando não houver internet.
+- Vídeo HDR é bloqueado para remoção gravada nesta primeira versão.
+- Vídeo VFR é convertido para FPS constante equivalente somente quando a imagem precisa
+  ser reconstruída. A resolução é mantida e o vídeo é codificado em H.264 CRF 16.
+- A IA estima o fundo oculto; ela não pode recuperar exatamente pixels que não existem.
+- Se o modelo falhar, o aplicativo interrompe sem usar borrão ou corte escondido.
+
+REDE COM PIN
+O acesso pela rede é opcional. Escolha essa opção no inicializador e informe o PIN temporário nos outros aparelhos da mesma rede. Tentativas repetidas incorretas são bloqueadas temporariamente. A chave Azure só pode ser alterada no próprio computador. A voz Piper continua sendo gerada no computador principal.
+
+AVISO DE ÁUDIO
+A antifase pode se cancelar quando o áudio é convertido para mono e pode mudar após recodificação. O resultado não garante comportamento específico em transcritores ou plataformas.

@@ -1,0 +1,9 @@
+fastapi==0.116.1
+uvicorn==0.35.0
+python-multipart==0.0.20
+keyring==25.6.0
+piper-tts==1.4.2
+onnxruntime==1.28.0
+numpy==2.2.6
+opencv-python==4.12.0.88
+rapidocr==3.9.1

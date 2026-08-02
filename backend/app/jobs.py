@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from .azure import synthesize_azure
+from .config import Settings, temp_root
+from .credentials import get_azure_credentials
+from .media import (
+    ffmpeg_command,
+    mux_clean_video_command,
+    mux_clean_video_with_voice_command,
+    probe_video,
+    strip_subtitle_tracks_command,
+    unique_output,
+)
+from .piper_local import synthesize_piper
+from .subtitle_processing import remove_burned_subtitles
+
+
+@dataclass
+class UploadRecord:
+    id: str
+    path: Path
+    filename: str
+    size: int
+    duration: float
+    audio_tracks: list[dict[str, object]]
+    subtitle_tracks: list[dict[str, object]]
+    probe: dict[str, object]
+
+    def public(self) -> dict[str, object]:
+        return {
+            "uploadId": self.id,
+            "filename": self.filename,
+            "duration": self.duration,
+            "size": self.size,
+            "audioTracks": self.audio_tracks,
+            "subtitleTracks": self.subtitle_tracks,
+            "resolution": {"width": self.probe["width"], "height": self.probe["height"]},
+            "fps": self.probe["fps"],
+            "videoCodec": self.probe["videoCodec"],
+            "variableFrameRate": self.probe["variableFrameRate"],
+            "hdr": self.probe["hdr"],
+            "color": {
+                "pixelFormat": self.probe["pixelFormat"],
+                "space": self.probe["colorSpace"],
+                "transfer": self.probe["colorTransfer"],
+                "primaries": self.probe["colorPrimaries"],
+            },
+        }
+
+
+@dataclass
+class JobRecord:
+    id: str
+    upload_id: str
+    status: str = "queued"
+    progress: float = 0.0
+    message: str = "Aguardando processamento"
+    output_path: Path | None = None
+    error: str | None = None
+
+    def public(self) -> dict[str, object]:
+        data: dict[str, object] = {"id": self.id, "status": self.status, "progress": round(self.progress, 1), "message": self.message}
+        if self.output_path:
+            data["outputName"] = self.output_path.name
+        if self.error:
+            data["error"] = self.error
+        return data
+
+
+class UploadStore:
+    def __init__(self) -> None:
+        self.directory = temp_root() / "uploads"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._records: dict[str, UploadRecord] = {}
+        self._lock = threading.Lock()
+
+    def add(self, path: Path, filename: str, size: int, probe: dict[str, object]) -> UploadRecord:
+        record = UploadRecord(
+            id=path.stem, path=path, filename=filename, size=size, duration=float(probe["duration"]),
+            audio_tracks=list(probe["audioTracks"]), subtitle_tracks=list(probe["subtitleTracks"]), probe=dict(probe),
+        )
+        with self._lock:
+            self._records[record.id] = record
+        return record
+
+    def get(self, upload_id: str) -> UploadRecord | None:
+        with self._lock:
+            return self._records.get(upload_id)
+
+    def remove(self, upload_id: str) -> None:
+        with self._lock:
+            record = self._records.pop(upload_id, None)
+        if record:
+            record.path.unlink(missing_ok=True)
+
+
+class JobManager:
+    def __init__(self, uploads: UploadStore, scans: Any, models: Any) -> None:
+        self.uploads = uploads
+        self.scans = scans
+        self.models = models
+        self._jobs: dict[str, JobRecord] = {}
+        self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ofuscador-job")
+        self._active_process: subprocess.Popen[str] | None = None
+
+    def create(
+        self, *, upload_id: str, mode: str = "audio", text: str = "", voice: str = "", gender: str = "Male",
+        volume_percent: int = 5, audio_stream_index: int | None = None, provider: str = "piper",
+        remove_embedded: bool = False, remove_burned_in: bool = False, scan_id: str | None = None,
+    ) -> JobRecord:
+        upload = self.uploads.get(upload_id)
+        if not upload:
+            raise ValueError("O envio do vídeo expirou. Escolha o arquivo novamente.")
+        if mode not in {"audio", "subtitles", "audio_and_subtitles"}:
+            raise ValueError("O modo de processamento escolhido não é válido.")
+        if self.scans.upload_in_use(upload_id):
+            raise RuntimeError("Aguarde o exame de legendas terminar antes de processar o vídeo.")
+        uses_audio = mode in {"audio", "audio_and_subtitles"}
+        if uses_audio:
+            if not text.strip() or not voice or audio_stream_index is None:
+                raise ValueError("Preencha o texto, a voz e a faixa de áudio original.")
+            if audio_stream_index not in {int(track["index"]) for track in upload.audio_tracks}:
+                raise ValueError("A faixa de áudio escolhida não existe neste vídeo.")
+        if mode in {"subtitles", "audio_and_subtitles"}:
+            if not remove_embedded and not remove_burned_in:
+                raise ValueError("Ative a remoção de uma faixa separada ou de uma legenda gravada.")
+            if remove_embedded and not upload.subtitle_tracks and not remove_burned_in:
+                raise ValueError("Este vídeo não possui uma faixa de legenda separada para remover.")
+            if remove_burned_in:
+                if bool(upload.probe.get("hdr")):
+                    raise ValueError("A remoção de legenda gravada em HDR está bloqueada nesta versão para preservar as cores.")
+                if not scan_id:
+                    raise ValueError("Examine e revise as regiões da legenda gravada antes de processar.")
+                self.scans.regions_for_job(scan_id, upload_id)
+        with self._lock:
+            if any(job.status in {"queued", "processing"} for job in self._jobs.values()):
+                raise RuntimeError("Já existe um vídeo sendo processado. Aguarde a conclusão.")
+            job = JobRecord(id=uuid.uuid4().hex, upload_id=upload_id)
+            self._jobs[job.id] = job
+        self._executor.submit(
+            self._run, job, mode, text, voice, gender, volume_percent, audio_stream_index, provider,
+            remove_embedded, remove_burned_in, scan_id,
+        )
+        return job
+
+    def get(self, job_id: str) -> JobRecord | None:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def upload_in_use(self, upload_id: str) -> bool:
+        with self._lock:
+            return any(job.upload_id == upload_id and job.status in {"queued", "processing"} for job in self._jobs.values())
+
+    def delete(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if not job:
+                return False
+            if job.status in {"queued", "processing"}:
+                raise RuntimeError("Aguarde o processamento terminar antes de excluir.")
+            self._jobs.pop(job_id, None)
+        if job.output_path:
+            job.output_path.unlink(missing_ok=True)
+        return True
+
+    def _update(self, job: JobRecord, **changes: object) -> None:
+        with self._lock:
+            for key, value in changes.items():
+                setattr(job, key, value)
+
+    def _synthesize(self, text: str, voice: str, provider: str, speech: Path) -> None:
+        if provider == "piper":
+            synthesize_piper(text, voice, speech)
+        elif provider == "azure":
+            try:
+                key, region = get_azure_credentials()
+            except Exception:
+                key, region = None, None
+            if not key or not region:
+                raise RuntimeError("Cadastre a chave e a região Azure nas configurações.")
+            synthesize_azure(text, voice, key, region, speech)
+        else:
+            raise RuntimeError("O provedor de voz escolhido não é válido.")
+
+    def _run_ffmpeg(self, job: JobRecord, command: list[str], duration: float, start: float, end: float, message: str) -> None:
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", creationflags=flags)
+        self._active_process = process
+        recent: list[str] = []
+        assert process.stdout is not None
+        for line in process.stdout:
+            line = line.strip()
+            recent.append(line)
+            recent = recent[-60:]
+            if line.startswith("out_time_us="):
+                try:
+                    seconds = int(line.split("=", 1)[1]) / 1_000_000
+                    self._update(job, progress=start + min(1.0, seconds / max(duration, 0.001)) * (end - start), message=message)
+                except ValueError:
+                    pass
+        return_code = process.wait()
+        self._active_process = None
+        if return_code != 0:
+            details = next((line for line in reversed(recent) if "error" in line.lower() or "invalid" in line.lower()), "")
+            raise RuntimeError(f"O FFmpeg não conseguiu concluir o vídeo. {details}".strip())
+
+    def _run(
+        self, job: JobRecord, mode: str, text: str, voice: str, gender: str, volume_percent: int,
+        audio_stream_index: int | None, provider: str, remove_embedded: bool, remove_burned_in: bool, scan_id: str | None,
+    ) -> None:
+        upload = self.uploads.get(job.upload_id)
+        if not upload:
+            self._update(job, status="failed", error="O arquivo temporário do vídeo não foi encontrado.", message="Falha")
+            return
+        work = temp_root() / "jobs" / job.id
+        speech = work / "speech.wav"
+        clean_video = work / "sem-legenda-imagem.mp4"
+        partial: Path | None = None
+        uses_audio = mode in {"audio", "audio_and_subtitles"}
+        subtitles_active = mode in {"subtitles", "audio_and_subtitles"}
+        try:
+            work.mkdir(parents=True, exist_ok=False)
+            self._update(job, status="processing", progress=2, message="Preparando o processamento")
+            if uses_audio:
+                self._update(job, progress=4, message="Preparando a voz")
+                self._synthesize(text, voice, provider, speech)
+
+            settings = Settings.load()
+            output_dir = settings.ensure_output()
+            required = upload.size * (3 if remove_burned_in else 1) + 512 * 1024 * 1024
+            if shutil.disk_usage(output_dir).free < required:
+                raise RuntimeError("Não há espaço livre suficiente na pasta de saída.")
+            final_output = unique_output(output_dir, upload.filename, subtitles=subtitles_active)
+            partial = output_dir / f".{job.id}.incompleto.mp4"
+
+            if mode == "audio":
+                assert audio_stream_index is not None
+                command = ffmpeg_command(upload.path, speech, partial, audio_stream_index, upload.duration, volume_percent)
+                self._update(job, progress=14, message="Combinando vídeo e áudio")
+                self._run_ffmpeg(job, command, upload.duration, 14, 96, "Combinando vídeo e áudio")
+            elif remove_burned_in:
+                assert scan_id is not None
+                regions = self.scans.regions_for_job(scan_id, upload.id)
+                self._update(job, progress=10 if uses_audio else 4, message="Reconstruindo o fundo sob as legendas")
+                lower = 12 if uses_audio else 5
+                upper = 82
+                remove_burned_subtitles(
+                    upload.path, clean_video, upload.probe, regions, self.models,
+                    lambda fraction, message: self._update(job, progress=lower + fraction * (upper - lower), message=message),
+                )
+                if uses_audio:
+                    assert audio_stream_index is not None
+                    command = mux_clean_video_with_voice_command(clean_video, upload.path, speech, partial, audio_stream_index, upload.duration, volume_percent, remove_subtitles=remove_embedded)
+                    message = "Aplicando voz e preservando a duração"
+                else:
+                    command = mux_clean_video_command(clean_video, upload.path, partial, upload.duration, remove_subtitles=remove_embedded)
+                    message = "Preservando as faixas de áudio originais"
+                self._run_ffmpeg(job, command, upload.duration, 83, 97, message)
+            elif mode == "subtitles":
+                command = strip_subtitle_tracks_command(upload.path, partial, upload.duration)
+                self._update(job, progress=14, message="Removendo faixas de legenda sem recodificar")
+                self._run_ffmpeg(job, command, upload.duration, 14, 97, "Removendo faixas de legenda sem recodificar")
+            else:
+                assert audio_stream_index is not None
+                command = ffmpeg_command(upload.path, speech, partial, audio_stream_index, upload.duration, volume_percent, keep_subtitles=not remove_embedded)
+                self._update(job, progress=14, message="Removendo legendas e aplicando a voz")
+                self._run_ffmpeg(job, command, upload.duration, 14, 97, "Removendo legendas e aplicando a voz")
+
+            if not partial.is_file() or partial.stat().st_size == 0:
+                raise RuntimeError("O arquivo final não foi criado corretamente.")
+            result_probe = probe_video(partial)
+            if remove_embedded and result_probe["subtitleTracks"]:
+                raise RuntimeError("A verificação encontrou uma faixa de legenda que deveria ter sido removida.")
+            tolerance = 1.0 / float(upload.probe["fps"]) + 0.04
+            if abs(float(result_probe["duration"]) - upload.duration) > tolerance:
+                raise RuntimeError("A duração do resultado ficou fora da tolerância de um quadro.")
+            partial.replace(final_output)
+            partial = None
+            self._update(job, status="completed", progress=100, message="Vídeo pronto", output_path=final_output)
+        except Exception as exc:
+            self._update(job, status="failed", message="Falha no processamento", error=str(exc) or "Erro inesperado.")
+        finally:
+            self._active_process = None
+            if partial:
+                partial.unlink(missing_ok=True)
+            shutil.rmtree(work, ignore_errors=True)
+            self.uploads.remove(job.upload_id)
+
+
+def cleanup_temporary_files() -> None:
+    root = temp_root()
+    for name in ("uploads", "jobs", "previews", "subtitle-previews"):
+        target = root / name
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        target.mkdir(parents=True, exist_ok=True)

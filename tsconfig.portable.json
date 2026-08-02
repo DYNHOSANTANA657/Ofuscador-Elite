@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false
+  },
+  "include": [
+    "app/page.tsx",
+    "app/layout.tsx",
+    "ui/**/*.tsx",
+    "portable-ui/**/*.tsx",
+    "portable.vite.config.ts",
+    "next-env.d.ts"
+  ],
+  "exclude": ["node_modules", "db", "worker", "build"]
+}

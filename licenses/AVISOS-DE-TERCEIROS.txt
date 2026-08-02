@@ -1,0 +1,20 @@
+Ofuscador Elite inclui componentes de código aberto.
+
+FFmpeg e FFprobe
+Projeto: https://ffmpeg.org/
+Licença incluída neste diretório. O construtor Windows usa a distribuição Gyan.dev disponível nesta máquina. O construtor macOS baixa binários estáticos para arm64 de Martin Riedl e para x86_64 de evermeet.cx.
+
+Python, FastAPI, Uvicorn, Keyring, React, Vite e dependências
+As licenças e avisos desses componentes permanecem disponíveis nos respectivos pacotes e projetos oficiais. A lista exata de versões está registrada em backend/requirements.txt e pnpm-lock.yaml no código-fonte entregue com o projeto.
+
+Piper 1.4.2 e ONNX Runtime
+Projeto Piper: https://github.com/OHF-Voice/piper1-gpl
+O mecanismo Piper é distribuído sob GPL-3.0 e sua licença está incluída neste diretório.
+O modelo pt_BR-faber-medium usa um conjunto de dados CC0 conforme o MODEL_CARD incluído. O modelo original está em https://huggingface.co/rhasspy/piper-voices.
+
+Remoção local de legendas
+RapidOCR/PP-OCR e LaMa ONNX são usados sob Apache-2.0. A recuperação temporal foi inspirada
+pela implementação MIT Video Subtitle Remover. Os avisos estão em IA-Legendas-APACHE-MIT.txt.
+O ProPainter acadêmico não está incluído.
+
+Este arquivo não altera os termos de nenhuma licença de terceiros.
