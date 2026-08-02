@@ -12,8 +12,12 @@ Fica assim no servidor:
     favicon.svg
     arquivos/
       OfuscadorElite-Windows-x64-v1.3.2.zip
+      OfuscadorElite-macOS-arm64-v1.3.2.zip
       OfuscadorElite-IA-Legendas-v1.zip
       SHA256SUMS.txt
+
+O pacote macOS é só para Macs Apple Silicon (M1 ou mais novos). Ele não tem
+assinatura da Apple, então na primeira vez o usuário abre com Control+clique.
 
 Não suba este arquivo (LEIA-ME-FTP.txt) — ele é só para você.
 
