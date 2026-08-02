@@ -259,6 +259,13 @@ class JobManager:
                 f"{upload.probe['frameCount']} quadros · {upload.probe['frameRateRational']} fps"
                 f"{' · VFR' if upload.probe['variableFrameRate'] else ''}"
             )
+            self._log(
+                job,
+                f"[origem] {upload.probe['videoCodec']} {upload.probe['width']}x{upload.probe['height']} · "
+                f"{upload.probe['pixelFormat']} · espaço {upload.probe['colorSpace'] or '—'} · "
+                f"transfer {upload.probe['colorTransfer'] or '—'}{' · HDR' if upload.probe['hdr'] else ''} · "
+                f"{len(upload.audio_tracks)} faixa(s) de áudio · {len(upload.subtitle_tracks)} de legenda"
+            )
             self._log(job, f"[modo] {mode} · faixas separadas={remove_embedded} · gravada={remove_burned_in}")
             if uses_audio:
                 self._update(job, progress=4, message="Preparando a voz")
