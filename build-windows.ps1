@@ -122,17 +122,56 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot "licenses\IA-Legendas-APACHE-MIT.
 $Executable = Join-Path $Package "OfuscadorElite\OfuscadorElite.exe"
 $SelfTestProcess = Start-Process -FilePath $Executable -ArgumentList "--self-test" -PassThru -Wait -WindowStyle Hidden
 if ($SelfTestProcess.ExitCode -ne 0) { throw "O teste interno do pacote Windows falhou." }
-[System.Reflection.Assembly]::LoadWithPartialName("System.IO.Compression.FileSystem") | Out-Null
+# O autoteste cria a pasta de dados ao lado do executável. Ela não deve ir no ZIP:
+# o aplicativo a recria sozinho na primeira execução do usuário.
+$SelfTestData = Join-Path $Package "OfuscadorElite\Dados"
+if (Test-Path -LiteralPath $SelfTestData) { Remove-Item -LiteralPath $SelfTestData -Recurse -Force }
+
+# ZipFile vem de System.IO.Compression.FileSystem; ZipArchive e ZipArchiveMode vêm
+# de System.IO.Compression. Carregar só o primeiro deixa os outros dois indefinidos.
+Add-Type -AssemblyName System.IO.Compression | Out-Null
+Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+
+function New-CompliantZip {
+    <#
+      O ZipFile::CreateFromDirectory do .NET Framework, que é o que o Windows
+      PowerShell 5.1 carrega, grava BARRAS INVERTIDAS nos nomes das entradas. O
+      formato ZIP exige barras normais, então Expand-Archive, unzip e o
+      descompactador do macOS falham ao extrair — só o Explorer do Windows tolera.
+      Aqui cada entrada é criada à mão com o separador correto.
+    #>
+    param([string]$SourceDirectory, [string]$Destination)
+    $Root = (Resolve-Path -LiteralPath $SourceDirectory).Path.TrimEnd('\')
+    $Prefix = Split-Path -Leaf $Root
+    $Archive = [System.IO.Compression.ZipFile]::Open($Destination, [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($File in Get-ChildItem -LiteralPath $Root -Recurse -File -Force) {
+            $Relative = $File.FullName.Substring($Root.Length + 1).Replace('\', '/')
+            $Entry = $Archive.CreateEntry("$Prefix/$Relative", [System.IO.Compression.CompressionLevel]::Optimal)
+            $Entry.LastWriteTime = [System.DateTimeOffset]::new($File.LastWriteTime)
+            $EntryStream = $Entry.Open()
+            try {
+                $FileStream = [System.IO.File]::OpenRead($File.FullName)
+                try { $FileStream.CopyTo($EntryStream) } finally { $FileStream.Dispose() }
+            } finally { $EntryStream.Dispose() }
+        }
+    } finally {
+        $Archive.Dispose()
+    }
+}
+
 $ZipCreated = $false
 $LastZipError = $null
 for ($Attempt = 1; $Attempt -le 5 -and -not $ZipCreated; $Attempt++) {
     if (Test-Path -LiteralPath $FinalZip) { Remove-Item -LiteralPath $FinalZip -Force }
     Start-Sleep -Milliseconds (500 * $Attempt)
     try {
-        [System.IO.Compression.ZipFile]::CreateFromDirectory($Package, $FinalZip, [System.IO.Compression.CompressionLevel]::Optimal, $true)
+        New-CompliantZip -SourceDirectory $Package -Destination $FinalZip
         $Archive = [System.IO.Compression.ZipFile]::OpenRead($FinalZip)
         try {
-            $ExpectedEntry = $Archive.Entries | Where-Object { ($_.FullName -replace '\\','/') -eq 'OfuscadorElite-Windows-x64/OfuscadorElite/OfuscadorElite.exe' }
+            $Backslashed = $Archive.Entries | Where-Object { $_.FullName -like '*\*' }
+            if ($Backslashed) { throw "O ZIP criado usa barras invertidas nos nomes; ele não seria extraído fora do Explorer." }
+            $ExpectedEntry = $Archive.Entries | Where-Object { $_.FullName -eq 'OfuscadorElite-Windows-x64/OfuscadorElite/OfuscadorElite.exe' }
             if (-not $ExpectedEntry -or $ExpectedEntry.Length -le 0) { throw "O ZIP criado não contém o executável esperado." }
         } finally {
             $Archive.Dispose()

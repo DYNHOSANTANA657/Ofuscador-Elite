@@ -10,7 +10,8 @@ PRÉVIA DE VOZ
 - O Piper local funciona sem internet e pode ser usado quando a Azure estiver indisponível.
 
 WINDOWS
-1. Extraia todo o arquivo ZIP.
+1. Extraia todo o arquivo ZIP em uma pasta de caminho curto, como C:\OfuscadorElite.
+   Pastas muito profundas estouram o limite de caminho do Windows e impedem a abertura.
 2. Abra a pasta OfuscadorElite.
 3. Clique duas vezes em OfuscadorElite.exe.
 4. Escolha “Abrir somente neste computador”.
