@@ -10,7 +10,7 @@ import pytest
 from app.config import find_binary
 from app.media import probe_video
 from app.subtitle_models import SubtitleModelManager, _safe_member
-from app.subtitle_processing import SubtitleFrameCleaner, regions_at, remove_burned_subtitles
+from app.subtitle_processing import SubtitleFrameCleaner, SubtitleRemovalError, regions_at, remove_burned_subtitles
 from app.subtitles import validate_region
 
 
@@ -72,6 +72,31 @@ def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
     result = probe_video(destination)
     assert int(result["frameCount"]) == int(info["frameCount"])
     assert abs(float(result["videoDuration"]) - float(info["videoDuration"])) < 0.05
+
+
+def test_temporal_recovery_stops_before_the_patch_smears() -> None:
+    """A recuperação temporal não pode ser propagada sem limite.
+
+    Cada propagação deforma o remendo do quadro anterior. Sem um teto, uma legenda
+    de vinte segundos arrastava o mesmo remendo por centenas de quadros e o
+    resultado virava uma mancha. Passado o teto, o LaMa precisa rodar de novo.
+    """
+    import cv2
+
+    height, width = 90, 160
+    background = np.full((height, width, 3), (80, 120, 160), dtype=np.uint8)
+    frame = background.copy()
+    cv2.putText(frame, "TESTE", (45, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    region = {"x": 0.2, "y": 0.55, "width": 0.65, "height": 0.35, "startMs": 0, "endMs": 60_000, "enabled": True}
+
+    cleaner = SubtitleFrameCleaner(NoModelNeeded(), fps=10.0)
+    assert cleaner._max_propagation == 10
+    for step in range(10):
+        cleaner.clean(frame, [region], background, background)
+        assert cleaner._propagated == step + 1
+    # Esgotado o teto, o caminho volta para o LaMa — que aqui não está instalado.
+    with pytest.raises(SubtitleRemovalError, match="não está instalado"):
+        cleaner.clean(frame, [region], background, background)
 
 
 def test_temporal_recovery_changes_only_mask_area() -> None:

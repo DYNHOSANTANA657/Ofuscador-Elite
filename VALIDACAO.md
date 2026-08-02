@@ -64,9 +64,43 @@ O que mudou:
   30000/1001 com B-frames, GOP de 250 e áudio mais longo que o vídeo, e confere
   contagem de quadros além da duração.
 
-Verificado até aqui apenas no nível do FFmpeg, em linha de comando. Os testes do
-backend e o diagnóstico completo ainda precisam ser executados — a máquina de
-desenvolvimento não tem Python instalado.
+### Causa raiz confirmada com um vídeo real
+
+Um vídeo de 2 minutos, 720x1280, 30 fps, 3591 quadros passou pela remoção gravada
+completa e o log registrou:
+
+```
+origem:    contêiner 119.837s · vídeo 119.700s · 3591 quadros
+resultado: contêiner 119.722s · vídeo 119.700s · 3591 quadros
+```
+
+A verificação antiga comparava contêiner com contêiner: `|119,722 − 119,837| = 0,115s`
+contra uma tolerância de `1/30 + 0,04 = 0,073s`. Falhava por 42 ms com o vídeo
+intacto — o que mudou foi a duração declarada da faixa de **áudio**, recalculada pelo
+FFmpeg ao remuxar. A verificação nova compara vídeo com vídeo: diferença zero.
+
+Os 3591 de 3591 quadros lidos também descartam a hipótese de perda de quadros na
+leitura. A troca do OpenCV pelo FFmpeg continua correta como reforço, mas não era
+a causa.
+
+## Correção posterior — mancha na reconstrução
+
+A remoção passou a concluir, mas deixava uma mancha visível no lugar da legenda,
+contrariando a promessa do LEIA-ME de nunca substituir uma falha por borrão.
+
+Causa: o LaMa rodava apenas no primeiro quadro de cada região. Nos seguintes, o
+código deformava com fluxo óptico o quadro **já limpo** anterior. Numa legenda de
+vinte segundos isso propagava o mesmo remendo por cerca de 650 quadros, cada um
+deformando o erro do anterior até virar um borrão.
+
+Correção: a propagação temporal passou a ter teto de aproximadamente um segundo de
+quadros; esgotado o teto, o LaMa roda de novo. Medido num trecho de 20 s do mesmo
+vídeo, com 600 quadros:
+
+- antigo: 600 quadros em 243 s (2,47 quadros/s), com mancha
+- novo: 600 quadros em 371 s (1,62 quadros/s), sem mancha
+
+O custo é cerca de 1,5x mais tempo de processamento.
 
 ## macOS
 

@@ -47,9 +47,15 @@ def regions_at(regions: list[dict[str, object]], time_ms: int) -> list[dict[str,
 
 
 class SubtitleFrameCleaner:
-    def __init__(self, models: SubtitleModelManager) -> None:
+    def __init__(self, models: SubtitleModelManager, fps: float = 30.0) -> None:
         self.models = models
         self._session = None
+        # A recuperação temporal deforma o quadro JÁ limpo do passo anterior. Repetir
+        # isso indefinidamente empilha o erro de cada deformação: numa legenda de vinte
+        # segundos o mesmo remendo era arrastado por centenas de quadros e virava uma
+        # mancha. Refazer o LaMa a cada ~1 segundo limita o acúmulo.
+        self._max_propagation = max(4, int(round(fps)))
+        self._propagated = 0
 
     def _session_for_lama(self):
         if self._session is not None:
@@ -89,7 +95,13 @@ class SubtitleFrameCleaner:
             return frame.copy()
         mask = self.mask_for(frame, regions)
         candidate = None
-        if previous_input is not None and previous_clean is not None and previous_input.shape == frame.shape:
+        can_propagate = (
+            previous_input is not None
+            and previous_clean is not None
+            and previous_input.shape == frame.shape
+            and self._propagated < self._max_propagation
+        )
+        if can_propagate:
             current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             previous_gray = cv2.cvtColor(previous_input, cv2.COLOR_BGR2GRAY)
             scene_change = float(np.mean(cv2.absdiff(current_gray, previous_gray)))
@@ -99,6 +111,9 @@ class SubtitleFrameCleaner:
                 candidate = cv2.remap(previous_clean, grid_x + flow[..., 0], grid_y + flow[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         if candidate is None:
             candidate = self._lama(frame, mask)
+            self._propagated = 0
+        else:
+            self._propagated += 1
         feather_size = max(3, int(round(min(frame.shape[:2]) * 0.009)) | 1)
         alpha = cv2.GaussianBlur(mask, (feather_size, feather_size), 0).astype(np.float32)[..., None] / 255.0
         return np.clip(frame.astype(np.float32) * (1 - alpha) + candidate.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
@@ -182,7 +197,7 @@ def remove_burned_subtitles(
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     logs = Path(tempfile.mkdtemp(prefix="ofuscador-ffmpeg-"))
     decode_log, encode_log = logs / "decode.txt", logs / "encode.txt"
-    cleaner = SubtitleFrameCleaner(models)
+    cleaner = SubtitleFrameCleaner(models, fps)
     previous_input = None
     previous_clean = None
     processed = 0
