@@ -74,6 +74,35 @@ def test_mask_covers_text_but_spares_the_rest_of_the_band() -> None:
     assert cv2.countNonZero(mask) < 0.30 * mask.size
 
 
+def test_mask_is_solid_per_line_and_keeps_lines_apart() -> None:
+    """Cada linha vira um bloco cheio; duas linhas não se fundem.
+
+    O bloco cheio é o que mata o fantasma da borda — o LaMa reconstrói uma área
+    contígua a partir do fundo limpo. Já manter as linhas separadas é o que evita
+    apagar um banner colorido inteiro: se as duas linhas virassem um bloco único, o
+    LaMa trataria o banner como objeto e o removeria deixando borrão.
+    """
+    import cv2
+
+    height, width = 240, 480
+    frame = np.full((height, width, 3), (40, 40, 40), dtype=np.uint8)
+    cv2.putText(frame, "LINHA UM", (60, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+    cv2.putText(frame, "LINHA DOIS", (60, 180), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+    region = {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+    mask = SubtitleFrameCleaner.mask_for(frame, [region])
+
+    # numa linha do meio do texto a máscara é uma BARRA CONTÍGUA (bloco, não traço):
+    # sem buracos entre as letras é o que impede o fantasma da borda.
+    row = mask[60]
+    xs = np.nonzero(row)[0]
+    assert xs.size > 150
+    holes = (xs[-1] - xs[0] + 1) - xs.size
+    assert holes < 6, "a máscara ficou vazada entre as letras (deixaria fantasma)"
+    # existe uma faixa horizontal totalmente vazia ENTRE as duas linhas
+    gap_rows = [row for row in range(95, 150) if cv2.countNonZero(mask[row:row + 1, :]) == 0]
+    assert gap_rows, "as duas linhas de legenda se fundiram num bloco só"
+
+
 def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
     """Nenhum quadro pode se perder entre a leitura e a regravação.
 

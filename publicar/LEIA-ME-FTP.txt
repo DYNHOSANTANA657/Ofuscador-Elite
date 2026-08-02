@@ -11,8 +11,8 @@ Fica assim no servidor:
     index.html
     favicon.svg
     arquivos/
-      OfuscadorElite-Windows-x64-v1.3.2.zip
-      OfuscadorElite-macOS-arm64-v1.3.2.zip
+      OfuscadorElite-Windows-x64-v1.3.3.zip
+      OfuscadorElite-macOS-arm64-v1.3.3.zip
       OfuscadorElite-IA-Legendas-v1.zip
       SHA256SUMS.txt
 

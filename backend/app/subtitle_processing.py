@@ -75,14 +75,23 @@ class SubtitleFrameCleaner:
 
     @staticmethod
     def _text_strokes(roi):
-        """Só as letras da legenda dentro do retângulo, não o retângulo inteiro.
+        """Só as linhas de legenda dentro do retângulo, não o retângulo inteiro.
 
-        Legendas gravadas são quase sempre texto claro (branco ou amarelo) com
-        contorno escuro. Marcar o retângulo cheio apagava mão, rosto e cenário
-        junto — as "falhas exageradas". Aqui isola-se o texto por cor mais o
-        contorno escuro por perto, ou, quando não há contorno, por componentes
-        claros e compactos do tamanho de letra. Fundo claro grande (pele, parede)
-        é descartado pelo tamanho, e o resto da imagem fica com o pixel original.
+        Legendas gravadas são quase sempre texto claro (branco ou amarelo). O teste
+        de cor (alta luminância + baixa saturação, ou amarelo karaokê) já é seletivo:
+        pele e parede claras têm matiz e quase nunca passam. As letras do tamanho
+        certo são agrupadas em LINHAS (conexão só na horizontal) e cada linha vira um
+        retângulo cheio, com uma folga que engole o contorno escuro e a sombra.
+
+        Por que retângulo cheio por linha, e não o traço da letra: o LaMa reconstrói
+        um bloco contíguo a partir do fundo limpo em volta e não deixa fantasma; um
+        traço fino de letra ele preenchia com pixels que ainda eram de outra letra e
+        sobrava a borda. E por que agrupar só na horizontal: duas linhas próximas não
+        podem virar um bloco único — um bloco grande dentro de um banner colorido faz
+        o LaMa apagar o banner inteiro e deixar borrão, enquanto faixas finas por
+        linha ele preenche com a cor em volta, mantendo a caixa. O tamanho de tudo é
+        relativo à ALTURA DA LETRA detectada, não à faixa que o usuário desenhou, então
+        uma caixa grande não engole o cenário e uma pequena ainda une as letras.
         """
         import cv2
         import numpy as np
@@ -91,38 +100,47 @@ class SubtitleFrameCleaner:
         b, g, r = cv2.split(roi.astype(np.int16))
         mx = np.maximum(np.maximum(b, g), r)
         mn = np.minimum(np.minimum(b, g), r)
-        white = (mn > 165) & ((mx - mn) < 50)
-        yellow = (r > 150) & (g > 135) & (b < 115)
-        bright = ((white | yellow).astype(np.uint8)) * 255
-        dark = ((mx < 85).astype(np.uint8)) * 255
         height, width = roi.shape[:2]
-        reach = max(3, int(round(height * 0.18)) | 1)
-        dark_near = cv2.dilate(dark, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach)))
-        outlined = cv2.bitwise_and(bright, dark_near)
-        # Uma palavra pode ser larga, então o que separa letra de pele/parede é a
-        # ALTURA (texto ocupa só a linha, não a faixa toda) e a área total, não a
-        # largura.
-        compact = np.zeros_like(bright)
+        white = (mn > 170) & ((mx - mn) < 45)
+        yellow = (r > 150) & (g > 135) & (b < 120)
+        bright = ((white | yellow).astype(np.uint8)) * 255
+
+        # Componentes claros do tamanho de letra: não a faixa toda em altura, nem um
+        # borrão gigante (parede/pele). O que separa letra de fundo é a ALTURA e a
+        # área, não a largura (uma palavra pode ser larga).
+        keep = np.zeros_like(bright)
+        heights = []
         count, labels, stats, _ = cv2.connectedComponentsWithStats(bright, 8)
         for index in range(1, count):
             area = stats[index, cv2.CC_STAT_AREA]
             box_h = stats[index, cv2.CC_STAT_HEIGHT]
-            if area >= 8 and box_h <= height * 0.7 and area <= 0.25 * height * width:
-                compact[labels == index] = 255
-        text = cv2.bitwise_or(outlined, compact)
-        text = cv2.morphologyEx(text, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 5)))
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(text, 8)
-        keep = np.zeros_like(text)
-        for index in range(1, count):
-            area = stats[index, cv2.CC_STAT_AREA]
-            box_w, box_h = stats[index, cv2.CC_STAT_WIDTH], stats[index, cv2.CC_STAT_HEIGHT]
-            if area < 8 or box_h > height * 0.80 or area < 0.06 * box_w * box_h:
+            if area < 6 or box_h > height * 0.75 or area > 0.20 * height * width:
                 continue
             keep[labels == index] = 255
-        # Engorda o suficiente p/ engolir o contorno escuro e a sombra da letra.
-        # Sem isso o LaMa preenchia só o miolo claro e sobrava o fantasma da borda.
-        grow = max(5, int(round(height * 0.12)) | 1)
-        return cv2.dilate(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+            heights.append(int(box_h))
+        if not heights:
+            return np.zeros((height, width), dtype=np.uint8)
+        glyph = int(np.median(heights))
+
+        # Agrupa em linhas conectando só na horizontal (kernel de 1px de altura) e
+        # preenche o retângulo de cada linha, com folga proporcional à letra.
+        link = max(3, int(glyph * 1.2) | 1)
+        linked = cv2.dilate(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (link, 1)))
+        out = np.zeros((height, width), dtype=np.uint8)
+        pad_x = max(2, int(glyph * 0.35))
+        pad_y = max(2, int(glyph * 0.25))
+        count, _, stats, _ = cv2.connectedComponentsWithStats(linked, 8)
+        for index in range(1, count):
+            x, y = stats[index, cv2.CC_STAT_LEFT], stats[index, cv2.CC_STAT_TOP]
+            w, h = stats[index, cv2.CC_STAT_WIDTH], stats[index, cv2.CC_STAT_HEIGHT]
+            if h > height * 0.85:
+                continue
+            if w < glyph * 0.5 and h < glyph * 0.5:
+                continue
+            x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
+            x1, y1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
+            out[y0:y1, x0:x1] = 255
+        return out
 
     @staticmethod
     def mask_for(frame, regions: list[dict[str, object]]):

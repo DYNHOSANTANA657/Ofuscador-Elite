@@ -1,4 +1,4 @@
-OFUSCADOR ELITE 1.3.2
+OFUSCADOR ELITE 1.3.3
 ===================
 
 O aplicativo processa vídeo e áudio inteiramente no computador onde está aberto.
