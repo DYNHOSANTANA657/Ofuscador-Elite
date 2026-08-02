@@ -48,12 +48,24 @@ Os comandos `pnpm run dev`, `pnpm run build` e `pnpm run start` funcionam em Win
 - `scripts/build-subtitle-model-pack.py`: cria `OfuscadorElite-IA-Legendas-v1.zip` e atualiza `SHA256SUMS.txt`.
 - `.github/workflows/build.yml`: compila Windows e macOS na nuvem. É o caminho para gerar o `.app` sem ter um Mac, já que o PyInstaller não faz compilação cruzada.
 
+## Estrutura da pasta
+
+```
+backend/        Servidor FastAPI, testes e a interface já compilada em static/
+ui/             EliteApp.tsx e globals.css — o código da interface
+portable-ui/    Ponto de entrada do Vite que monta o EliteApp
+scripts/        Montagem e verificação do pacote de IA e da pipeline de legendas
+licenses/       Avisos de terceiros que acompanham cada pacote
+publicar/       O que vai por FTP: página de download e a pasta arquivos/
+.github/        Compilação de Windows e macOS na nuvem
+```
+
 ## Site de download
 
-`site/` contém a página estática publicada por FTP na Hostinger, com os links dos
-pacotes e os SHA-256. Ela é independente da interface do aplicativo: `app/page.tsx`
-renderiza o `EliteApp`, que sem o backend local só mostra o modo de apresentação.
-As instruções de publicação estão em `site/LEIA-ME-PUBLICACAO.txt`.
+`publicar/` é a pasta que vai por FTP: uma página estática com os links dos pacotes
+e os SHA-256. Ela serve para baixar o programa — não processa vídeo, porque isso
+exige FFmpeg, ONNX Runtime e o modelo LaMa rodando na máquina de quem usa.
+As instruções estão em `publicar/LEIA-ME-FTP.txt`.
 
 Os modelos de legenda são instalados somente na primeira ativação ou importados pelo ZIP. A publicação na Hostinger usa apenas HTTPS público; nenhuma credencial FTP entra no aplicativo.
 

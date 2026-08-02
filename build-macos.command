@@ -130,7 +130,6 @@ build_arch() {
   mkdir -p "$package_dir/Licencas"
   cp -R "$BUILD_ROOT/dist-$1/OfuscadorElite.app" "$package_dir/OfuscadorElite.app"
   cp "$PROJECT_ROOT/LEIA-ME.txt" "$package_dir/"
-  cp "$PROJECT_ROOT/PUBLICACAO-HOSTINGER.txt" "$package_dir/"
   cp "$PROJECT_ROOT/licenses/FFmpeg-GPLv3.txt" "$package_dir/Licencas/"
   cp "$PROJECT_ROOT/licenses/Piper-GPLv3.txt" "$package_dir/Licencas/"
   cp "$PROJECT_ROOT/backend/voices/MODEL_CARD-pt_BR-faber-medium.txt" "$package_dir/Licencas/Modelo-Faber-CC0.txt"

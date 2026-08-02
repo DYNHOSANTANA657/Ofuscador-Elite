@@ -112,7 +112,6 @@ $Package = Join-Path $BuildRoot "OfuscadorElite-Windows-x64"
 New-Item -ItemType Directory -Path $Package | Out-Null
 Move-Item -LiteralPath (Join-Path $PyInstallerDist "OfuscadorElite") -Destination (Join-Path $Package "OfuscadorElite")
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "LEIA-ME.txt") -Destination $Package
-Copy-Item -LiteralPath (Join-Path $ProjectRoot "PUBLICACAO-HOSTINGER.txt") -Destination $Package
 New-Item -ItemType Directory -Path (Join-Path $Package "Licencas") | Out-Null
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "licenses\FFmpeg-GPLv3.txt") -Destination (Join-Path $Package "Licencas\FFmpeg-GPLv3.txt")
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "licenses\Piper-GPLv3.txt") -Destination (Join-Path $Package "Licencas\Piper-GPLv3.txt")

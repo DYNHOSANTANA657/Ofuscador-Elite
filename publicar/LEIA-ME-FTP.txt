@@ -1,0 +1,72 @@
+COMO PUBLICAR ESTA PASTA NA HOSTINGER
+=====================================
+
+Suba TODO o conteúdo desta pasta "publicar" para a pasta pública do seu domínio
+(normalmente public_html). Não suba a pasta "publicar" em si — suba o que está
+dentro dela, para que o index.html fique na raiz do site.
+
+Fica assim no servidor:
+
+  public_html/
+    index.html
+    favicon.svg
+    arquivos/
+      OfuscadorElite-Windows-x64-v1.3.1.zip
+      OfuscadorElite-IA-Legendas-v1.zip
+      SHA256SUMS.txt
+
+Não suba este arquivo (LEIA-ME-FTP.txt) — ele é só para você.
+
+Depois de subir, abra https://SEU-DOMINIO/ no navegador. A página mostra os
+botões de download e os códigos de verificação.
+
+
+O QUE A PÁGINA FAZ E O QUE NÃO FAZ
+----------------------------------
+A página serve para as pessoas BAIXAREM o programa. Ela não processa vídeo.
+
+Isso não é uma limitação que dá para contornar com ajuste: hospedagem
+compartilhada só entrega arquivos prontos. Para processar vídeo é preciso o
+FFmpeg instalado, o ONNX Runtime e o modelo LaMa de 208 MB carregado na
+memória, além de vários minutos de CPU por vídeo. Nada disso existe em
+hospedagem compartilhada.
+
+Quem quiser processar um vídeo baixa o ZIP, extrai e abre o programa. Aí sim a
+interface abre no navegador — mas servida pelo próprio computador da pessoa, em
+127.0.0.1, com todo o processamento local. O vídeo nunca sai da máquina dela.
+
+
+DEPOIS DE PUBLICAR: LIGAR O DOWNLOAD AUTOMÁTICO DA IA
+----------------------------------------------------
+Enquanto a URL do pacote de IA não for informada na construção do programa, o
+botão "Baixar e instalar" dentro do aplicativo não funciona e o usuário só
+consegue usar "Importar ZIP". Para ligar, reconstrua o pacote assim:
+
+  .\build-windows.ps1 `
+    -PythonPath C:\Users\edeni\Python312\python.exe `
+    -SubtitleModelUrl "https://SEU-DOMINIO/arquivos/OfuscadorElite-IA-Legendas-v1.zip" `
+    -SubtitleModelSha256 "E655D34870D18A1F6535A61D14C93D807A982CCA8DE78231B2135149D9C6774D"
+
+No macOS as mesmas informações vão em variáveis de ambiente antes de rodar
+./build-macos.command:
+
+  export OFUSCADOR_SUBTITLE_MODEL_URL="https://SEU-DOMINIO/arquivos/OfuscadorElite-IA-Legendas-v1.zip"
+  export OFUSCADOR_SUBTITLE_MODEL_SHA256="E655D348...774D"
+
+O aplicativo só aceita a instalação online quando os dois valores estão
+presentes e o SHA-256 do arquivo baixado bate exatamente com o configurado.
+
+
+AO PUBLICAR UMA VERSÃO NOVA
+---------------------------
+Se o conteúdo de qualquer ZIP mudar, o SHA-256 muda junto. Atualize os três
+lugares: o index.html, o arquivos/SHA256SUMS.txt e o parâmetro usado na
+construção. Um SHA-256 desatualizado faz o aplicativo recusar o download — que
+é o comportamento correto, não um defeito.
+
+
+SEGURANÇA
+---------
+- Usuário e senha de FTP nunca entram no código nem no pacote do aplicativo.
+- Use HTTPS no domínio. O aplicativo recusa URLs que não sejam HTTPS.
+- O FTP serve só para publicar arquivos.

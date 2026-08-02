@@ -4,18 +4,16 @@ import test from "node:test";
 
 const project = new URL("../", import.meta.url);
 
-test("a versão web usa a interface e os metadados do Ofuscador Elite", async () => {
-  const [page, layout, hosting] = await Promise.all([
-    readFile(new URL("app/page.tsx", project), "utf8"),
-    readFile(new URL("app/layout.tsx", project), "utf8"),
-    readFile(new URL(".openai/hosting.json", project), "utf8"),
+test("a interface portátil monta o EliteApp com os estilos do projeto", async () => {
+  const [entry, page] = await Promise.all([
+    readFile(new URL("portable-ui/main.tsx", project), "utf8"),
+    readFile(new URL("portable-ui/index.html", project), "utf8"),
   ]);
 
-  assert.match(page, /<EliteApp\s*\/>/);
-  assert.match(layout, /title:\s*"Ofuscador Elite"/);
-  assert.match(layout, /lang="pt-BR"/);
-  assert.doesNotMatch(page + layout, /SkeletonPreview|Starter Project|codex-preview/);
-  assert.deepEqual(JSON.parse(hosting), { d1: null, r2: null });
+  assert.match(entry, /<EliteApp\s*\/>/);
+  assert.match(entry, /import "@\/ui\/globals\.css"/);
+  assert.match(page, /lang="pt-BR"/);
+  assert.doesNotMatch(entry + page, /SkeletonPreview|Starter Project|codex-preview/);
 });
 
 test("a interface compilada possui o fluxo principal", async () => {
