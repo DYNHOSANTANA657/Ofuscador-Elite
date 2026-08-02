@@ -2,7 +2,9 @@
 
 import { ChangeEvent, FormEvent, type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Provider = "piper" | "azure";
+type Provider = "piper" | "azure" | "file";
+type AudioAsset = { audioId: string; filename: string; duration: number; size: number; codec: string };
+type BatchItem = { key: string; name: string; size: number; status: string; progress: number; message: string; jobId?: string; outputName?: string; error?: string; warning?: string };
 type ProcessMode = "audio" | "subtitles" | "audio_and_subtitles";
 type Voice = { shortName: string; displayName: string; gender: "Male" | "Female"; locale: string; provider: Provider; local?: boolean };
 type AudioTrack = { index: number; order: number; codec: string; channels: number; language: string; title: string };
@@ -95,6 +97,10 @@ export function EliteApp() {
   const [voice, setVoice] = useState(fallbackVoices[0].shortName);
   const [volume, setVolume] = useState(5);
   const [job, setJob] = useState<Job | null>(null);
+  const [audioAsset, setAudioAsset] = useState<AudioAsset | null>(null);
+  const [audioUploading, setAudioUploading] = useState(false);
+  const [batch, setBatch] = useState<BatchItem[]>([]);
+  const [batchStarting, setBatchStarting] = useState(false);
   const [notice, setNotice] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [azureKey, setAzureKey] = useState("");
@@ -110,6 +116,7 @@ export function EliteApp() {
   const [networkPin, setNetworkPin] = useState("");
   const [authenticating, setAuthenticating] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const audioFileInput = useRef<HTMLInputElement>(null);
   const modelFileInput = useRef<HTMLInputElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const previewObjectUrl = useRef("");
@@ -118,6 +125,7 @@ export function EliteApp() {
 
   const jobActive = Boolean(job && ["queued", "processing"].includes(job.status));
   const subtitleScanActive = Boolean(scan && ["queued", "scanning"].includes(scan.status));
+  const batchActive = batchStarting || batch.some((item) => ["queued", "processing", "enviando"].includes(item.status));
 
   const loadStatus = useCallback(async () => {
     try {
@@ -168,6 +176,8 @@ export function EliteApp() {
   }, [scan?.id, scan?.status]);
 
   useEffect(() => {
+    // Com áudio próprio não existe voz para carregar; o endpoint só aceita piper/azure.
+    if (provider === "file") return;
     let cancelled = false;
     apiJson<{ voices: Voice[] }>(`/api/voices?provider=${provider}&gender=${gender}`)
       .then(({ voices: available }) => {
@@ -204,6 +214,31 @@ export function EliteApp() {
     return () => window.clearInterval(timer);
   }, [job?.id, jobActive]);
 
+  // Depende só da lista de identificadores pendentes. Depender de `batch` inteiro
+  // recriaria o intervalo a cada resposta do servidor.
+  const batchPendingIds = useMemo(
+    () => batch.filter((item) => item.jobId && ["queued", "processing"].includes(item.status)).map((item) => item.jobId).join(","),
+    [batch],
+  );
+
+  useEffect(() => {
+    if (!batchPendingIds) return;
+    const ids = batchPendingIds.split(",");
+    const timer = window.setInterval(async () => {
+      try {
+        const updates = await Promise.all(ids.map((id) => apiJson<Job>(`/api/jobs/${id}`)));
+        setBatch((current) => current.map((item) => {
+          const next = updates.find((update) => update.id === item.jobId);
+          if (!next) return item;
+          return { ...item, status: next.status, progress: next.progress, message: next.message, outputName: next.outputName, error: next.error, warning: next.warning };
+        }));
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Não foi possível acompanhar a fila.");
+      }
+    }, 900);
+    return () => window.clearInterval(timer);
+  }, [batchPendingIds]);
+
   useEffect(() => {
     if (!previewUrl || !audioRef.current) return;
     const player = audioRef.current;
@@ -223,14 +258,120 @@ export function EliteApp() {
   const usesAudio = mode !== "subtitles";
   const usesSubtitles = mode !== "audio";
   const subtitleReady = !usesSubtitles || ((removeEmbedded && Boolean(upload?.subtitleTracks.length)) || (removeBurnedIn && scan?.status === "completed" && regions.some((item) => item.enabled)));
-  const audioReady = !usesAudio || Boolean(textValue.trim() && textValue.length <= 5000 && voice && audioTrack !== null);
-  const canProcess = Boolean(upload && audioReady && subtitleReady && !uploading && !jobActive && !subtitleScanActive && job?.status !== "completed");
+  const usesOwnAudio = provider === "file";
+  const voiceReady = usesOwnAudio ? Boolean(audioAsset) : Boolean(textValue.trim() && textValue.length <= 5000 && voice);
+  const audioReady = !usesAudio || Boolean(voiceReady && audioTrack !== null);
+  const canProcess = Boolean(upload && audioReady && subtitleReady && !uploading && !jobActive && !subtitleScanActive && !batchActive && job?.status !== "completed");
+  // O lote repete o mesmo ajuste em vários vídeos, como o script que percorria a
+  // pasta inteira. Só vale para o modo Áudio: legenda gravada exige revisão por vídeo.
+  const batchAllowed = mode === "audio";
 
   function clearPreview() {
     if (previewObjectUrl.current) URL.revokeObjectURL(previewObjectUrl.current);
     previewObjectUrl.current = "";
     setPreviewUrl("");
     setPreviewMessage("");
+  }
+
+  async function sendAudio(file: File) {
+    setNotice("");
+    if (file.size > 300 * 1024 * 1024) {
+      setNotice("O áudio ultrapassa o limite de 300 MB.");
+      return;
+    }
+    if (!backendOnline) {
+      setNotice("Abra esta interface pelo inicializador do aplicativo para enviar o áudio.");
+      return;
+    }
+    setAudioUploading(true);
+    try {
+      const form = new FormData();
+      form.append("audio", file);
+      const response = await fetch("/api/audio", { method: "POST", body: form, credentials: "same-origin" });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.detail || "O áudio não pôde ser analisado.");
+      if (audioAsset?.audioId) {
+        void fetch(`/api/audio/${audioAsset.audioId}`, { method: "DELETE", credentials: "same-origin" });
+      }
+      setAudioAsset(body as AudioAsset);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "O áudio não pôde ser analisado.");
+    } finally {
+      setAudioUploading(false);
+    }
+  }
+
+  async function startBatch(files: File[]) {
+    setNotice("");
+    if (!backendOnline) {
+      setNotice("Abra esta interface pelo inicializador do aplicativo para processar vídeos.");
+      return;
+    }
+    if (usesOwnAudio ? !audioAsset : !textValue.trim() || (!usesOwnAudio && !voice)) {
+      setNotice(usesOwnAudio ? "Envie o arquivo de áudio antes de processar o lote." : "Escreva o texto e escolha a voz antes de processar o lote.");
+      return;
+    }
+    const invalid = files.filter((file) => !file.name.toLowerCase().endsWith(".mp4"));
+    if (invalid.length) {
+      setNotice(`Estes arquivos não são MP4 e foram ignorados: ${invalid.map((file) => file.name).join(", ")}`);
+    }
+    const accepted = files.filter((file) => file.name.toLowerCase().endsWith(".mp4") && file.size <= 2 * 1024 * 1024 * 1024);
+    if (!accepted.length) {
+      setNotice("Nenhum MP4 válido foi selecionado.");
+      return;
+    }
+    setJob(null);
+    setVideo(null);
+    setUpload(null);
+    setBatchStarting(true);
+    setBatch(accepted.map((file, index) => ({ key: `${index}-${file.name}`, name: file.name, size: file.size, status: "enviando", progress: 0, message: "Enviando o vídeo" })));
+
+    for (const [index, file] of accepted.entries()) {
+      const key = `${index}-${file.name}`;
+      const patch = (changes: Partial<BatchItem>) => setBatch((current) => current.map((item) => (item.key === key ? { ...item, ...changes } : item)));
+      try {
+        const form = new FormData();
+        form.append("video", file);
+        const uploadResponse = await fetch("/api/uploads", { method: "POST", body: form, credentials: "same-origin" });
+        const uploaded = await uploadResponse.json().catch(() => ({}));
+        if (!uploadResponse.ok) throw new Error(uploaded.detail || "O vídeo não pôde ser analisado.");
+        const track = uploaded.audioTracks?.[0]?.index;
+        if (track === undefined) throw new Error("Este vídeo não possui faixa de áudio para misturar.");
+        const created = await apiJson<Job>("/api/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            uploadId: uploaded.uploadId, mode: "audio",
+            text: usesOwnAudio ? "" : textValue.trim(), voice: usesOwnAudio ? "" : voice, gender,
+            provider, audioAssetId: usesOwnAudio ? audioAsset?.audioId : null,
+            volumePercent: volume, audioStreamIndex: track,
+            subtitleRemoval: { removeEmbedded: false, removeBurnedIn: false, scanId: null },
+          }),
+        });
+        patch({ jobId: created.id, status: created.status, progress: created.progress, message: created.message });
+      } catch (error) {
+        patch({ status: "failed", message: "Falha", error: error instanceof Error ? error.message : "Não foi possível enfileirar este vídeo." });
+      }
+    }
+    setBatchStarting(false);
+  }
+
+  function clearBatch() {
+    if (batchActive) return;
+    setBatch([]);
+    setNotice("");
+  }
+
+  function chooseVideos(files: File[]) {
+    if (!files.length) return;
+    if (files.length === 1) {
+      sendVideo(files[0]);
+      return;
+    }
+    if (!batchAllowed) {
+      setNotice("Vários vídeos de uma vez só funcionam no modo Áudio. A remoção de legenda precisa da revisão de cada vídeo.");
+      return;
+    }
+    void startBatch(files);
   }
 
   function sendVideo(file: File) {
@@ -357,8 +498,10 @@ export function EliteApp() {
         await saveRegions();
       }
       const next = await apiJson<Job>("/api/jobs", { method: "POST", body: JSON.stringify({
-        uploadId: upload.uploadId, mode, text: usesAudio ? textValue : "", voice: usesAudio ? voice : "", gender,
-        provider, volumePercent: volume, audioStreamIndex: usesAudio ? audioTrack : null,
+        uploadId: upload.uploadId, mode,
+        text: usesAudio && !usesOwnAudio ? textValue : "", voice: usesAudio && !usesOwnAudio ? voice : "", gender,
+        provider, audioAssetId: usesAudio && usesOwnAudio ? audioAsset?.audioId : null,
+        volumePercent: volume, audioStreamIndex: usesAudio ? audioTrack : null,
         subtitleRemoval: { removeEmbedded: usesSubtitles && removeEmbedded, removeBurnedIn: usesSubtitles && removeBurnedIn, scanId: removeBurnedIn ? scan?.id : null },
       }) });
       setJob(next);
@@ -509,6 +652,12 @@ export function EliteApp() {
     if (next === "piper") setGender("Male");
   }
 
+  function removeOwnAudio() {
+    if (!audioAsset || jobActive || batchActive) return;
+    void fetch(`/api/audio/${audioAsset.audioId}`, { method: "DELETE", credentials: "same-origin" });
+    setAudioAsset(null);
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -538,14 +687,16 @@ export function EliteApp() {
       <section className="workspace">
         <div className="step-card video-card">
           <div className="step-heading"><span>01</span><div><h2>Vídeo original</h2><p>MP4 com até 2 GB</p></div></div>
-          <input ref={fileInput} type="file" accept="video/mp4,.mp4" hidden disabled={jobActive || subtitleScanActive} onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) sendVideo(file); }}/>
-          {!video ? (
-            <button className="drop-zone" onClick={() => fileInput.current?.click()}><span className="upload-icon">↑</span><b>Escolher vídeo MP4</b><small>O arquivo original será preservado</small></button>
-          ) : (
+          <input ref={fileInput} type="file" accept="video/mp4,.mp4" hidden multiple={batchAllowed} disabled={jobActive || subtitleScanActive || batchActive} onChange={(event) => { const files = Array.from(event.target.files || []); event.target.value = ""; chooseVideos(files); }}/>
+          {video ? (
             <div className="file-panel">
               <div className="file-icon">▶</div><div className="file-data"><b>{video.name}</b><small>{formatBytes(video.size)}{upload ? ` · ${formatTime(upload.duration)}` : ""}</small></div>
               <button disabled={jobActive || subtitleScanActive} onClick={() => fileInput.current?.click()}>{jobActive ? "Em processamento" : subtitleScanActive ? "Analisando" : "Trocar"}</button>
             </div>
+          ) : batch.length > 0 ? (
+            <div className="file-panel"><div className="file-icon">≡</div><div className="file-data"><b>{batch.length} vídeos na fila</b><small>{batch.filter((item) => item.status === "completed").length} prontos · {batch.filter((item) => item.status === "failed").length} com falha</small></div><button disabled={batchActive} onClick={() => { clearBatch(); window.setTimeout(() => fileInput.current?.click(), 0); }}>{batchActive ? "Processando" : "Nova fila"}</button></div>
+          ) : (
+            <button className="drop-zone" disabled={batchActive} onClick={() => fileInput.current?.click()}><span className="upload-icon">↑</span><b>Escolher vídeo MP4</b><small>{batchAllowed ? "Pode escolher vários de uma vez · o original é preservado" : "O arquivo original será preservado"}</small></button>
           )}
           {uploading && <div className="progress-wrap"><div><span>Analisando o vídeo…</span><b>{uploadProgress}%</b></div><progress value={uploadProgress} max="100"/></div>}
           {upload && usesAudio && upload.audioTracks.length > 0 && <label className="field-label">Faixa de áudio original<select value={audioTrack ?? ""} onChange={(e) => setAudioTrack(Number(e.target.value))}>{upload.audioTracks.map((track) => <option key={track.index} value={track.index}>Faixa {track.order} · {track.codec.toUpperCase()} · {track.channels === 1 ? "Mono" : `${track.channels} canais`}{track.language !== "und" ? ` · ${track.language}` : ""}{track.title ? ` · ${track.title}` : ""}</option>)}</select></label>}
@@ -593,17 +744,27 @@ export function EliteApp() {
           </div>}
         </div>}
 
-        {usesAudio && <div className="step-card text-card">
+        {usesAudio && !usesOwnAudio && <div className="step-card text-card">
           <div className="step-heading"><span>02</span><div><h2>Texto para a voz</h2><p>Até 5.000 caracteres</p></div><label className="import-button">Importar .txt<input type="file" accept="text/plain,.txt" hidden onChange={onTextFile}/></label></div>
           <textarea value={textValue} maxLength={5000} onChange={(event) => setTextValue(event.target.value)} placeholder="Digite ou cole aqui o texto que será transformado em fala…"/>
           <div className="text-footer"><span>O texto será repetido até o vídeo terminar</span><b className={textValue.length >= 4900 ? "limit" : ""}>{textValue.length.toLocaleString("pt-BR")} / 5.000</b></div>
         </div>}
 
         {usesAudio && <div className="step-card voice-card">
-          <div className="step-heading"><span>03</span><div><h2>Voz e intensidade</h2><p>Escolha como a voz será aplicada</p></div></div>
+          <div className="step-heading"><span>{usesOwnAudio ? "02" : "03"}</span><div><h2>{usesOwnAudio ? "Áudio e intensidade" : "Voz e intensidade"}</h2><p>{usesOwnAudio ? "Escolha o arquivo que será misturado" : "Escolha como a voz será aplicada"}</p></div></div>
           <div className="voice-controls">
-            <label className="control-label">Origem da voz</label>
-            <div className="provider-toggle"><button className={provider === "piper" ? "active" : ""} onClick={() => chooseProvider("piper")}><b>Piper local</b><small>Grátis e sem internet</small></button><button className={provider === "azure" ? "active" : ""} onClick={() => chooseProvider("azure")}><b>Azure Speech</b><small>Opcional e mais natural</small></button></div>
+            <label className="control-label">Origem do áudio</label>
+            <div className="provider-toggle"><button className={provider === "piper" ? "active" : ""} onClick={() => chooseProvider("piper")}><b>Piper local</b><small>Grátis e sem internet</small></button><button className={provider === "azure" ? "active" : ""} onClick={() => chooseProvider("azure")}><b>Azure Speech</b><small>Opcional e mais natural</small></button><button className={provider === "file" ? "active" : ""} onClick={() => chooseProvider("file")}><b>Meu áudio</b><small>MP3 ou WAV do seu computador</small></button></div>
+
+            {usesOwnAudio ? <div className="own-audio-panel">
+              <input ref={audioFileInput} type="file" hidden accept="audio/*,.mp3,.wav,.m4a,.aac,.ogg,.flac" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void sendAudio(file); }}/>
+              {!audioAsset ? (
+                <button className="drop-zone audio-drop" disabled={audioUploading} onClick={() => audioFileInput.current?.click()}><span className="upload-icon">♪</span><b>{audioUploading ? "Analisando o áudio…" : "Escolher arquivo de áudio"}</b><small>MP3, WAV, M4A, AAC, OGG ou FLAC · até 300 MB</small></button>
+              ) : (
+                <div className="file-panel"><div className="file-icon">♪</div><div className="file-data"><b>{audioAsset.filename}</b><small>{formatBytes(audioAsset.size)} · {formatTime(audioAsset.duration)} · {audioAsset.codec.toUpperCase()}</small></div><button disabled={audioUploading || jobActive || batchActive} onClick={() => audioFileInput.current?.click()}>Trocar</button><button className="secondary" disabled={audioUploading || jobActive || batchActive} onClick={removeOwnAudio}>Remover</button></div>
+              )}
+              <p className="provider-note">O áudio é repetido até o vídeo terminar e entra no mesmo volume ajustado abaixo. O áudio original do vídeo continua com a antifase.</p>
+            </div> : <>
             <label className="control-label">Tipo de voz</label>
             <div className="gender-toggle"><button disabled={provider === "piper"} className={gender === "Female" ? "active" : ""} onClick={() => setGender("Female")} title={provider === "piper" ? "A voz pt-BR local licenciada deste pacote é masculina." : "Voz feminina"}><i>♀</i> Feminina</button><button className={gender === "Male" ? "active" : ""} onClick={() => setGender("Male")}><i>♂</i> Masculina</button></div>
             {provider === "piper" && <p className="provider-note">A voz pt-BR local incluída neste pacote é masculina. Para uma voz feminina, selecione Azure Speech.</p>}
@@ -612,19 +773,44 @@ export function EliteApp() {
             <label className="field-label">Voz em português do Brasil<select value={voice} disabled={!voices.length} onChange={(event) => setVoice(event.target.value)}>{voices.length ? voices.map((item) => <option value={item.shortName} key={item.shortName}>{item.displayName}</option>) : <option value="">Nenhuma voz disponível</option>}</select></label>
             <div className="preview-row"><button className="preview-button" onClick={previewVoice} disabled={previewing || !textValue.trim() || !voice}>{previewing ? "Criando prévia…" : "▶  Ouvir prévia"}</button><span>{selectedVoice?.provider === "piper" ? "Piper local · sem custo" : "Azure Speech · online"}</span></div>
             {previewUrl && <div className="preview-player"><audio ref={audioRef} src={previewUrl} controls preload="auto" className="audio-player" onPlay={() => setPreviewMessage("Reproduzindo a prévia gerada.")} onEnded={() => setPreviewMessage("Prévia concluída. Você pode reproduzi-la novamente.")} onError={() => setNotice("O navegador não conseguiu abrir a prévia WAV. Use a opção Baixar prévia.")}/><div className="preview-actions"><button type="button" onClick={() => void playPreview()}>▶ Reproduzir</button><a href={previewUrl} download="previa-ofuscador-elite.wav">↓ Baixar prévia WAV</a></div><small className="preview-status" aria-live="polite">{previewMessage}</small></div>}
+            </>}
           </div>
-          <div className="volume-block"><div><label htmlFor="volume">Volume da voz gerada</label><output>{volume}%</output></div><input id="volume" type="range" min="0" max="25" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/><div className="range-labels"><span>Discreto</span><span>Máximo seguro</span></div></div>
+          <div className="volume-block"><div><label htmlFor="volume">{usesOwnAudio ? "Volume do áudio enviado" : "Volume da voz gerada"}</label><output>{volume}%</output></div><input id="volume" type="range" min="0" max="25" value={volume} onChange={(event) => setVolume(Number(event.target.value))}/><div className="range-labels"><span>Discreto</span><span>Máximo seguro</span></div></div>
         </div>}
       </section>
 
       {notice && <div className="notice" role="alert"><span>!</span><p>{notice}</p><button onClick={() => setNotice("")}>×</button></div>}
 
-      <section className="action-panel">
+      {batch.length > 0 && <section className="batch-panel">
+        <div className="batch-heading">
+          <div><b>Fila de processamento</b><small>Um vídeo por vez, com o mesmo ajuste de áudio. Os originais não são alterados.</small></div>
+          <button disabled={batchActive} onClick={clearBatch}>{batchActive ? `${batch.filter((item) => ["completed", "failed"].includes(item.status)).length} de ${batch.length}` : "Limpar fila"}</button>
+        </div>
+        <ul className="batch-list">
+          {batch.map((item) => (
+            <li key={item.key} className={`batch-item ${item.status}`}>
+              <div className="batch-name"><b>{item.name}</b><small>{formatBytes(item.size)}</small></div>
+              <div className="batch-state">
+                <span>{item.status === "completed" ? "Pronto" : item.status === "failed" ? "Falhou" : item.status === "enviando" ? "Enviando o vídeo" : item.message}</span>
+                <progress value={item.status === "completed" ? 100 : item.progress} max="100"/>
+              </div>
+              {item.status === "completed" && item.jobId
+                ? <a className="batch-action" href={`/api/jobs/${item.jobId}/download`}>↓ Baixar</a>
+                : <span className="batch-action muted">{item.status === "failed" ? "—" : `${Math.round(item.progress)}%`}</span>}
+              {item.error && <small className="batch-error">{item.error}</small>}
+              {item.warning && <small className="batch-warning">{item.warning}</small>}
+            </li>
+          ))}
+        </ul>
+        <p className="destination">Os resultados são salvos em <b>{status.outputDirectory}</b></p>
+      </section>}
+
+      {batch.length === 0 && <section className="action-panel">
         {usesAudio ? <div className="signal-summary"><div><span className="channel l">L</span><p><b>Original + voz</b><small>Canal esquerdo</small></p></div><i>→</i><div><span className="channel r">R</span><p><b>Original invertido + voz</b><small>Canal direito</small></p></div></div> : <div className="signal-summary subtitle-summary"><div><span className="channel l">CC</span><p><b>Legendas removidas</b><small>Todas as faixas de áudio originais serão preservadas</small></p></div></div>}
         {job && <div className={`job-progress ${job.status}`}><div><span>{job.status === "completed" ? "Vídeo pronto" : job.status === "failed" ? "O processamento parou" : job.message}</span><b>{Math.round(job.progress)}%</b></div><progress value={job.progress} max="100"/>{job.error && <small>{job.error}</small>}{job.warning && <small className="job-warning">{job.warning}</small>}</div>}
         {job?.status === "completed" ? <div className="completion-actions"><a className="primary-action ready" href={`/api/jobs/${job.id}/download`}>↓ Baixar {job.outputName || "vídeo processado"}</a><button type="button" onClick={prepareNextVideo}>Processar outro vídeo</button></div> : <button className="primary-action" disabled={!canProcess} onClick={processVideo}>{jobActive ? "Processando…" : "Processar vídeo"}<span>→</span></button>}
         <p className="destination">O resultado será salvo em <b>{status.outputDirectory}</b></p>
-      </section>
+      </section>}
 
       <section className="warning-card"><span>i</span><div><b>{usesAudio ? "Importante sobre a antifase" : "Importante sobre a remoção"}</b><p>{usesAudio ? "O efeito pode se cancelar quando o áudio é convertido para mono e pode mudar após uma nova compressão. Ele não garante como serviços de transcrição ou plataformas interpretarão o conteúdo." : "Faixas separadas são removidas sem perda. Para legendas gravadas, a IA reconstrói uma estimativa do fundo e o vídeo precisa ser recodificado; o arquivo original permanece intacto."}</p></div></section>
 

@@ -10,9 +10,11 @@ import pytest
 from app.azure import generate_diagnostic_wav
 from app.config import find_binary
 from app.media import (
+    MediaError,
     ffmpeg_command,
     mux_clean_video_command,
     mux_clean_video_with_voice_command,
+    probe_audio,
     probe_video,
     strip_subtitle_tracks_command,
 )
@@ -178,6 +180,47 @@ def test_mux_clean_video_does_not_truncate_the_reconstructed_video(tmp_path: Pat
     assert int(final["frameCount"]) == int(info["frameCount"])
     assert abs(float(final["videoDuration"]) - float(info["videoDuration"])) < 0.05
     assert "-t" not in mux_clean_video_command(clean, source, output, float(info["duration"]))
+
+
+def test_probe_audio_accepts_mp3_and_rejects_files_without_audio(tmp_path: Path) -> None:
+    music = tmp_path / "trilha.mp3"
+    run([find_binary("ffmpeg"), "-hide_banner", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=2.5", "-c:a", "libmp3lame", str(music)])
+    info = probe_audio(music)
+    assert info["codec"] == "mp3"
+    assert abs(float(info["duration"]) - 2.5) < 0.15
+
+    silent = tmp_path / "sem-audio.mp4"
+    make_video(silent, duration=0.5, with_audio=False)
+    with pytest.raises(MediaError, match="faixa de áudio"):
+        probe_audio(silent)
+
+
+def test_user_supplied_audio_is_mixed_like_the_reference_ffmpeg_line(tmp_path: Path) -> None:
+    """Reproduz o comando do arquivo de referência: áudio do vídeo a 1.0 e uma
+    trilha própria a 5%, com a antifase do aplicativo por cima."""
+    source = tmp_path / "source.mp4"
+    music = tmp_path / "trilha.mp3"
+    output = tmp_path / "final.mp4"
+    make_video(source, duration=3.0)
+    run([find_binary("ffmpeg"), "-hide_banner", "-y", "-f", "lavfi", "-i", "sine=frequency=880:duration=1.0", "-c:a", "libmp3lame", str(music)])
+    info = probe_video(source)
+    # O MP3 entra no lugar do WAV da voz: o mesmo caminho serve para os dois.
+    run(ffmpeg_command(source, music, output, int(info["audioTracks"][0]["index"]), float(info["duration"]), 5))
+    result = probe_video(output)
+    assert result["audioTracks"][0]["channels"] == 2
+    assert abs(float(result["duration"]) - float(info["duration"])) < 0.06
+
+    decoded = subprocess.run(
+        [find_binary("ffmpeg"), "-v", "error", "-i", str(output), "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "2", "pipe:1"],
+        capture_output=True, timeout=90, check=True,
+    ).stdout
+    samples = array.array("f")
+    samples.frombytes(decoded)
+    left, right = samples[0::2].tolist(), samples[1::2].tolist()
+    assert correlation(left, right) < -0.75
+    # A trilha de 1s foi repetida pelo `-stream_loop -1` até o fim dos 3s de vídeo.
+    tail = [(l + r) / 2 for l, r in zip(left[-24_000:], right[-24_000:])]
+    assert rms(tail) > 0.001
 
 
 def test_combined_clean_video_keeps_antiphase_mix(tmp_path: Path) -> None:

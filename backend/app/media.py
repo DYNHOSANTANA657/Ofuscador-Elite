@@ -136,6 +136,41 @@ def probe_video(path: Path) -> dict[str, object]:
     }
 
 
+def probe_audio(path: Path) -> dict[str, object]:
+    """Valida um arquivo de áudio enviado pelo usuário para ser mixado no vídeo."""
+    command = [find_binary("ffprobe"), "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise MediaError("O áudio não pôde ser analisado pelo FFprobe.") from exc
+    if result.returncode != 0:
+        raise MediaError("O arquivo de áudio está corrompido ou em um formato não reconhecido.")
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise MediaError("Não foi possível analisar o arquivo de áudio.") from exc
+    streams = list(data.get("streams", []))
+    audios = [stream for stream in streams if stream.get("codec_type") == "audio"]
+    if not audios:
+        raise MediaError("Este arquivo não contém nenhuma faixa de áudio.")
+    audio = audios[0]
+    duration = 0.0
+    try:
+        duration = float(data.get("format", {}).get("duration", 0) or 0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration <= 0:
+        duration = _stream_float(audio, "duration")
+    if not math.isfinite(duration) or duration <= 0:
+        raise MediaError("Não foi possível identificar a duração do áudio.")
+    return {
+        "duration": duration,
+        "codec": str(audio.get("codec_name", "desconhecido")),
+        "channels": int(audio.get("channels", 0) or 0),
+        "sampleRate": int(str(audio.get("sample_rate", "0") or 0)),
+    }
+
+
 def safe_stem(filename: str) -> str:
     stem = Path(filename).stem
     stem = re.sub(r"[\x00-\x1f<>:\"/\\|?*]+", "-", stem)

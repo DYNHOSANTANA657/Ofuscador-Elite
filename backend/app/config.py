@@ -11,7 +11,9 @@ from pathlib import Path
 
 APP_NAME = "OfuscadorElite"
 MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024
+MAX_AUDIO_BYTES = 300 * 1024 * 1024
 MAX_TEXT_LENGTH = 5_000
+AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
 
 
 def is_frozen() -> bool:

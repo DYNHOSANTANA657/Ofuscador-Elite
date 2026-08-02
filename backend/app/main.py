@@ -13,10 +13,10 @@ from starlette.background import BackgroundTask
 
 from . import __version__
 from .azure import AzureSpeechError, VoiceCache, synthesize_azure
-from .config import MAX_TEXT_LENGTH, MAX_VIDEO_BYTES, Settings, resource_root, temp_root
+from .config import AUDIO_EXTENSIONS, MAX_AUDIO_BYTES, MAX_TEXT_LENGTH, MAX_VIDEO_BYTES, Settings, resource_root, temp_root
 from .credentials import delete_azure_credentials, get_azure_credentials, set_azure_credentials
-from .jobs import JobManager, UploadStore, cleanup_temporary_files
-from .media import MediaError, probe_video
+from .jobs import AudioStore, JobManager, UploadStore, cleanup_temporary_files
+from .media import MediaError, probe_audio, probe_video
 from .piper_local import PIPER_VOICES, PiperSpeechError, piper_available, synthesize_piper
 from .security import COOKIE_NAME, SessionSecurity, require_local
 from .subtitle_models import SUBTITLE_MODELS
@@ -28,8 +28,9 @@ VOICE_CACHE = VoiceCache()
 
 cleanup_temporary_files()
 UPLOADS = UploadStore()
+AUDIO_ASSETS = AudioStore()
 SUBTITLE_SCANS = SubtitleScanManager(UPLOADS, SUBTITLE_MODELS)
-JOBS = JobManager(UPLOADS, SUBTITLE_SCANS, SUBTITLE_MODELS)
+JOBS = JobManager(UPLOADS, SUBTITLE_SCANS, SUBTITLE_MODELS, AUDIO_ASSETS)
 
 app = FastAPI(title="Ofuscador Elite", version=__version__, docs_url=None, redoc_url=None)
 
@@ -87,13 +88,19 @@ class JobRequest(BaseModel):
     gender: str = Field(default="Male", pattern="^(Male|Female)$")
     volumePercent: int = Field(default=5, ge=0, le=25)
     audioStreamIndex: int | None = Field(default=None, ge=0)
-    provider: str = Field(default="piper", pattern="^(piper|azure)$")
+    provider: str = Field(default="piper", pattern="^(piper|azure|file)$")
+    audioAssetId: str | None = Field(default=None, min_length=32, max_length=32)
     subtitleRemoval: SubtitleRemovalRequest = Field(default_factory=SubtitleRemovalRequest)
 
     @model_validator(mode="after")
     def validate_mode_fields(self) -> "JobRequest":
         if self.mode in {"audio", "audio_and_subtitles"}:
-            if not self.text.strip() or not self.voice or self.audioStreamIndex is None:
+            if self.audioStreamIndex is None:
+                raise ValueError("Escolha a faixa de áudio original do vídeo.")
+            if self.provider == "file":
+                if not self.audioAssetId:
+                    raise ValueError("Envie o arquivo de áudio que será misturado ao vídeo.")
+            elif not self.text.strip() or not self.voice:
                 raise ValueError("Preencha o texto, a voz e a faixa de áudio original.")
         if self.mode in {"subtitles", "audio_and_subtitles"}:
             removal = self.subtitleRemoval
@@ -280,6 +287,49 @@ async def upload_video(video: UploadFile = File(...)) -> dict[str, object]:
         await video.close()
 
 
+@app.post("/api/audio")
+async def upload_audio(audio: UploadFile = File(...)) -> dict[str, object]:
+    """Recebe um MP3/WAV próprio para entrar no lugar da voz sintetizada."""
+    filename = audio.filename or "audio.mp3"
+    if not filename.lower().endswith(AUDIO_EXTENSIONS):
+        raise HTTPException(status_code=415, detail="Escolha um arquivo MP3, WAV, M4A, AAC, OGG ou FLAC.")
+    audio_id = uuid.uuid4().hex
+    suffix = Path(filename).suffix.lower()
+    destination = temp_root() / "audio" / f"{audio_id}{suffix}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    size = 0
+    try:
+        with destination.open("xb") as output:
+            while chunk := await audio.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_AUDIO_BYTES:
+                    raise HTTPException(status_code=413, detail="O áudio ultrapassa o limite de 300 MB.")
+                output.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="O arquivo de áudio está vazio.")
+        probe = probe_audio(destination)
+        record = AUDIO_ASSETS.add(destination, filename, size, probe)
+        return record.public()
+    except MediaError as exc:
+        destination.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+    finally:
+        await audio.close()
+
+
+@app.delete("/api/audio/{audio_id}")
+def delete_audio(audio_id: str) -> dict[str, bool]:
+    if len(audio_id) != 32 or not AUDIO_ASSETS.get(audio_id):
+        raise HTTPException(status_code=404, detail="Áudio não encontrado.")
+    if AUDIO_ASSETS.in_use(audio_id, JOBS.snapshot()):
+        raise HTTPException(status_code=409, detail="Este áudio está sendo usado em um processamento.")
+    AUDIO_ASSETS.remove(audio_id)
+    return {"deleted": True}
+
+
 @app.post("/api/jobs")
 def create_job(payload: JobRequest) -> dict[str, object]:
     try:
@@ -295,6 +345,7 @@ def create_job(payload: JobRequest) -> dict[str, object]:
             remove_embedded=payload.subtitleRemoval.removeEmbedded,
             remove_burned_in=payload.subtitleRemoval.removeBurnedIn,
             scan_id=payload.subtitleRemoval.scanId,
+            audio_asset_id=payload.audioAssetId,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

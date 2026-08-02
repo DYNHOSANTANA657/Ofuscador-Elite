@@ -102,6 +102,41 @@ def test_piper_preview_returns_browser_playable_wav(monkeypatch: pytest.MonkeyPa
     assert len(response.content) > 48
 
 
+def test_own_audio_upload_and_validation(tmp_path: Path) -> None:
+    import subprocess
+
+    from app.config import find_binary
+
+    client = TestClient(app)
+    # Sem o arquivo de áudio, o modo "meu áudio" não pode iniciar.
+    missing = client.post("/api/jobs", json={"uploadId": "a" * 32, "mode": "audio", "provider": "file", "audioStreamIndex": 1})
+    assert missing.status_code == 422
+    # E o texto/voz deixam de ser obrigatórios quando o áudio vem de um arquivo.
+    rejected = client.post("/api/audio", files={"audio": ("nota.txt", b"nao sou audio", "text/plain")})
+    assert rejected.status_code == 415
+
+    music = tmp_path / "trilha.mp3"
+    subprocess.run([
+        find_binary("ffmpeg"), "-hide_banner", "-y", "-f", "lavfi",
+        "-i", "sine=frequency=440:duration=1.5", "-c:a", "libmp3lame", str(music),
+    ], capture_output=True, timeout=90, check=True)
+    accepted = client.post("/api/audio", files={"audio": ("trilha.mp3", music.read_bytes(), "audio/mpeg")})
+    assert accepted.status_code == 200
+    body = accepted.json()
+    assert len(body["audioId"]) == 32
+    assert body["codec"] == "mp3"
+    assert abs(float(body["duration"]) - 1.5) < 0.15
+    assert client.delete(f"/api/audio/{body['audioId']}").json() == {"deleted": True}
+    assert client.delete(f"/api/audio/{body['audioId']}").status_code == 404
+
+
+def test_broken_audio_file_is_rejected_with_a_clear_message() -> None:
+    client = TestClient(app)
+    response = client.post("/api/audio", files={"audio": ("quebrado.mp3", b"\x00" * 4096, "audio/mpeg")})
+    assert response.status_code == 400
+    assert "áudio" in response.json()["detail"].lower()
+
+
 def test_remote_client_requires_session() -> None:
     client = TestClient(app, client=("192.168.50.20", 5000))
     assert client.get("/api/config/status").status_code == 401

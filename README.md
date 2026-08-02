@@ -12,6 +12,8 @@ Aplicativo portátil para Windows e macOS que gera fala em português do Brasil 
 - Processamento de um vídeo por vez, sem modificar o arquivo original.
 - Acesso local por padrão e modo de rede opcional protegido por PIN temporário.
 - Três modos: áudio, legendas e áudio + legendas.
+- Alternativa à voz sintetizada: enviar um MP3/WAV próprio, repetido até o vídeo terminar.
+- Fila: vários MP4 selecionados de uma vez recebem o mesmo ajuste, um processado por vez.
 - Remoção sem perda de faixas de legenda separadas.
 - Detecção de legenda gravada com RapidOCR, revisão manual e prévia antes/depois.
 - Reconstrução local com recuperação temporal e LaMa ONNX, sem API paga nem envio do vídeo.

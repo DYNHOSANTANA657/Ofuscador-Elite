@@ -68,9 +68,13 @@ class JobRecord:
     output_path: Path | None = None
     error: str | None = None
     warning: str | None = None
+    audio_asset_id: str | None = None
+    source_name: str = ""
 
     def public(self) -> dict[str, object]:
         data: dict[str, object] = {"id": self.id, "status": self.status, "progress": round(self.progress, 1), "message": self.message}
+        if self.source_name:
+            data["sourceName"] = self.source_name
         if self.output_path:
             data["outputName"] = self.output_path.name
         if self.error:
@@ -78,6 +82,50 @@ class JobRecord:
         if self.warning:
             data["warning"] = self.warning
         return data
+
+
+@dataclass
+class AudioRecord:
+    """Áudio próprio enviado pelo usuário para entrar no lugar da voz sintetizada."""
+    id: str
+    path: Path
+    filename: str
+    size: int
+    duration: float
+    codec: str
+
+    def public(self) -> dict[str, object]:
+        return {"audioId": self.id, "filename": self.filename, "duration": self.duration, "size": self.size, "codec": self.codec}
+
+
+class AudioStore:
+    def __init__(self) -> None:
+        self.directory = temp_root() / "audio"
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self._records: dict[str, AudioRecord] = {}
+        self._lock = threading.Lock()
+
+    def add(self, path: Path, filename: str, size: int, probe: dict[str, object]) -> AudioRecord:
+        record = AudioRecord(
+            id=path.stem, path=path, filename=filename, size=size,
+            duration=float(probe["duration"]), codec=str(probe["codec"]),
+        )
+        with self._lock:
+            self._records[record.id] = record
+        return record
+
+    def get(self, audio_id: str) -> AudioRecord | None:
+        with self._lock:
+            return self._records.get(audio_id)
+
+    def remove(self, audio_id: str) -> None:
+        with self._lock:
+            record = self._records.pop(audio_id, None)
+        if record:
+            record.path.unlink(missing_ok=True)
+
+    def in_use(self, audio_id: str, jobs: dict[str, "JobRecord"]) -> bool:
+        return any(job.audio_asset_id == audio_id and job.status in {"queued", "processing"} for job in jobs.values())
 
 
 class UploadStore:
@@ -108,10 +156,11 @@ class UploadStore:
 
 
 class JobManager:
-    def __init__(self, uploads: UploadStore, scans: Any, models: Any) -> None:
+    def __init__(self, uploads: UploadStore, scans: Any, models: Any, audio: AudioStore | None = None) -> None:
         self.uploads = uploads
         self.scans = scans
         self.models = models
+        self.audio = audio or AudioStore()
         self._jobs: dict[str, JobRecord] = {}
         self._lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ofuscador-job")
@@ -121,6 +170,7 @@ class JobManager:
         self, *, upload_id: str, mode: str = "audio", text: str = "", voice: str = "", gender: str = "Male",
         volume_percent: int = 5, audio_stream_index: int | None = None, provider: str = "piper",
         remove_embedded: bool = False, remove_burned_in: bool = False, scan_id: str | None = None,
+        audio_asset_id: str | None = None,
     ) -> JobRecord:
         upload = self.uploads.get(upload_id)
         if not upload:
@@ -131,7 +181,12 @@ class JobManager:
             raise RuntimeError("Aguarde o exame de legendas terminar antes de processar o vídeo.")
         uses_audio = mode in {"audio", "audio_and_subtitles"}
         if uses_audio:
-            if not text.strip() or not voice or audio_stream_index is None:
+            if audio_stream_index is None:
+                raise ValueError("Escolha a faixa de áudio original do vídeo.")
+            if provider == "file":
+                if not audio_asset_id or not self.audio.get(audio_asset_id):
+                    raise ValueError("Envie o arquivo de áudio que será misturado ao vídeo.")
+            elif not text.strip() or not voice:
                 raise ValueError("Preencha o texto, a voz e a faixa de áudio original.")
             if audio_stream_index not in {int(track["index"]) for track in upload.audio_tracks}:
                 raise ValueError("A faixa de áudio escolhida não existe neste vídeo.")
@@ -147,15 +202,26 @@ class JobManager:
                     raise ValueError("Examine e revise as regiões da legenda gravada antes de processar.")
                 self.scans.regions_for_job(scan_id, upload_id)
         with self._lock:
-            if any(job.status in {"queued", "processing"} for job in self._jobs.values()):
-                raise RuntimeError("Já existe um vídeo sendo processado. Aguarde a conclusão.")
-            job = JobRecord(id=uuid.uuid4().hex, upload_id=upload_id)
+            if any(job.upload_id == upload_id and job.status in {"queued", "processing"} for job in self._jobs.values()):
+                raise RuntimeError("Este vídeo já está na fila de processamento.")
+            # Vários vídeos podem ser enfileirados de uma vez, como o script .bat que
+            # percorria a pasta inteira. O executor de um worker garante que só um roda
+            # por vez, então a fila é atendida em ordem sem concorrer por CPU nem disco.
+            job = JobRecord(id=uuid.uuid4().hex, upload_id=upload_id, audio_asset_id=audio_asset_id, source_name=upload.filename)
             self._jobs[job.id] = job
         self._executor.submit(
             self._run, job, mode, text, voice, gender, volume_percent, audio_stream_index, provider,
             remove_embedded, remove_burned_in, scan_id,
         )
         return job
+
+    def queue_length(self) -> int:
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if job.status in {"queued", "processing"})
+
+    def snapshot(self) -> dict[str, JobRecord]:
+        with self._lock:
+            return dict(self._jobs)
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:
@@ -197,6 +263,8 @@ class JobManager:
             pass
 
     def _synthesize(self, text: str, voice: str, provider: str, speech: Path) -> None:
+        if provider == "file":
+            raise RuntimeError("O áudio próprio não é sintetizado.")
         if provider == "piper":
             synthesize_piper(text, voice, speech)
         elif provider == "azure":
@@ -268,8 +336,18 @@ class JobManager:
             )
             self._log(job, f"[modo] {mode} · faixas separadas={remove_embedded} · gravada={remove_burned_in}")
             if uses_audio:
-                self._update(job, progress=4, message="Preparando a voz")
-                self._synthesize(text, voice, provider, speech)
+                if provider == "file":
+                    asset = self.audio.get(job.audio_asset_id or "")
+                    if not asset or not asset.path.is_file():
+                        raise RuntimeError("O arquivo de áudio enviado expirou. Envie-o novamente.")
+                    # O FFmpeg lê MP3/WAV/M4A direto e o `-stream_loop -1` já repete o
+                    # áudio até o vídeo acabar; converter para WAV aqui só gastaria disco.
+                    speech = asset.path
+                    self._update(job, progress=4, message="Preparando o áudio enviado")
+                    self._log(job, f"[áudio] {asset.filename} · {asset.codec} · {asset.duration:.3f}s")
+                else:
+                    self._update(job, progress=4, message="Preparando a voz")
+                    self._synthesize(text, voice, provider, speech)
 
             settings = Settings.load()
             output_dir = settings.ensure_output()
@@ -376,7 +454,7 @@ class JobManager:
 
 def cleanup_temporary_files() -> None:
     root = temp_root()
-    for name in ("uploads", "jobs", "previews", "subtitle-previews"):
+    for name in ("uploads", "jobs", "previews", "subtitle-previews", "audio"):
         target = root / name
         if target.exists():
             shutil.rmtree(target, ignore_errors=True)

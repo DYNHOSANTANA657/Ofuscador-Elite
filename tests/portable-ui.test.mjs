@@ -9,9 +9,30 @@ test("oferece Piper local por padrão e Azure opcional", async () => {
   assert.match(source, /useState<Provider>\("piper"\)/);
   assert.match(source, /Piper local/);
   assert.match(source, /Azure Speech/);
-  assert.match(source, /provider, volumePercent/);
+  assert.match(source, /provider, audioAssetId:/);
+  assert.match(source, /volumePercent: volume/);
   assert.match(source, /piperAvailable/);
   assert.doesNotMatch(source, /Modo de teste ativo/);
+});
+
+test("aceita um arquivo de áudio próprio no lugar da voz sintetizada", async () => {
+  const source = await readFile(new URL("ui/EliteApp.tsx", project), "utf8");
+  assert.match(source, /"piper" \| "azure" \| "file"/);
+  assert.match(source, /fetch\("\/api\/audio", \{ method: "POST"/);
+  assert.match(source, /Meu áudio/);
+  assert.match(source, /Volume do áudio enviado/);
+  // Sem voz sintetizada não há texto nem prévia para pedir.
+  assert.match(source, /usesAudio && !usesOwnAudio && <div className="step-card text-card">/);
+});
+
+test("processa vários vídeos em fila com o mesmo ajuste", async () => {
+  const source = await readFile(new URL("ui/EliteApp.tsx", project), "utf8");
+  assert.match(source, /function startBatch/);
+  assert.match(source, /multiple=\{batchAllowed\}/);
+  // Lote só no modo Áudio: legenda gravada precisa de revisão por vídeo.
+  assert.match(source, /const batchAllowed = mode === "audio"/);
+  assert.match(source, /Fila de processamento/);
+  assert.match(source, /batchPendingIds/);
 });
 
 test("a compilação portátil contém interface e estilos", async () => {
