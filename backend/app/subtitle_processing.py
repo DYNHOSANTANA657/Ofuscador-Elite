@@ -74,6 +74,57 @@ class SubtitleFrameCleaner:
         return self._session
 
     @staticmethod
+    def _text_strokes(roi):
+        """Só as letras da legenda dentro do retângulo, não o retângulo inteiro.
+
+        Legendas gravadas são quase sempre texto claro (branco ou amarelo) com
+        contorno escuro. Marcar o retângulo cheio apagava mão, rosto e cenário
+        junto — as "falhas exageradas". Aqui isola-se o texto por cor mais o
+        contorno escuro por perto, ou, quando não há contorno, por componentes
+        claros e compactos do tamanho de letra. Fundo claro grande (pele, parede)
+        é descartado pelo tamanho, e o resto da imagem fica com o pixel original.
+        """
+        import cv2
+        import numpy as np
+        if roi.size == 0:
+            return np.zeros(roi.shape[:2], dtype=np.uint8)
+        b, g, r = cv2.split(roi.astype(np.int16))
+        mx = np.maximum(np.maximum(b, g), r)
+        mn = np.minimum(np.minimum(b, g), r)
+        white = (mn > 165) & ((mx - mn) < 50)
+        yellow = (r > 150) & (g > 135) & (b < 115)
+        bright = ((white | yellow).astype(np.uint8)) * 255
+        dark = ((mx < 85).astype(np.uint8)) * 255
+        height, width = roi.shape[:2]
+        reach = max(3, int(round(height * 0.18)) | 1)
+        dark_near = cv2.dilate(dark, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach)))
+        outlined = cv2.bitwise_and(bright, dark_near)
+        # Uma palavra pode ser larga, então o que separa letra de pele/parede é a
+        # ALTURA (texto ocupa só a linha, não a faixa toda) e a área total, não a
+        # largura.
+        compact = np.zeros_like(bright)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(bright, 8)
+        for index in range(1, count):
+            area = stats[index, cv2.CC_STAT_AREA]
+            box_h = stats[index, cv2.CC_STAT_HEIGHT]
+            if area >= 8 and box_h <= height * 0.7 and area <= 0.25 * height * width:
+                compact[labels == index] = 255
+        text = cv2.bitwise_or(outlined, compact)
+        text = cv2.morphologyEx(text, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 5)))
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(text, 8)
+        keep = np.zeros_like(text)
+        for index in range(1, count):
+            area = stats[index, cv2.CC_STAT_AREA]
+            box_w, box_h = stats[index, cv2.CC_STAT_WIDTH], stats[index, cv2.CC_STAT_HEIGHT]
+            if area < 8 or box_h > height * 0.80 or area < 0.06 * box_w * box_h:
+                continue
+            keep[labels == index] = 255
+        # Engorda o suficiente p/ engolir o contorno escuro e a sombra da letra.
+        # Sem isso o LaMa preenchia só o miolo claro e sobrava o fantasma da borda.
+        grow = max(5, int(round(height * 0.12)) | 1)
+        return cv2.dilate(keep, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (grow, grow)))
+
+    @staticmethod
     def mask_for(frame, regions: list[dict[str, object]]):
         import cv2
         import numpy as np
@@ -84,8 +135,9 @@ class SubtitleFrameCleaner:
             y1 = max(0, min(height - 1, int(float(region["y"]) * height)))
             x2 = max(x1 + 1, min(width, int(round((float(region["x"]) + float(region["width"])) * width))))
             y2 = max(y1 + 1, min(height, int(round((float(region["y"]) + float(region["height"])) * height))))
-            cv2.rectangle(mask, (x1, y1), (x2, y2), 255, thickness=-1)
-        kernel = max(3, int(round(min(height, width) * 0.004)) | 1)
+            strokes = SubtitleFrameCleaner._text_strokes(frame[y1:y2, x1:x2])
+            mask[y1:y2, x1:x2] = cv2.max(mask[y1:y2, x1:x2], strokes)
+        kernel = max(3, int(round(min(height, width) * 0.006)) | 1)
         return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel)))
 
     def clean(self, frame, regions: list[dict[str, object]], previous_input, previous_clean):

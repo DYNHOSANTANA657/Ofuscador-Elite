@@ -47,6 +47,33 @@ class NoModelNeeded:
         return None
 
 
+def test_mask_covers_text_but_spares_the_rest_of_the_band() -> None:
+    """A máscara marca só as letras, não a faixa inteira.
+
+    Era isso que causava as "falhas exageradas": o retângulo cheio apagava mão,
+    rosto e cenário junto com a legenda. Aqui um bloco claro grande (pele/parede)
+    convive com o texto; a máscara precisa cobrir o texto e poupar o bloco.
+    """
+    import cv2
+
+    height, width = 160, 480
+    frame = np.full((height, width, 3), (60, 90, 40), dtype=np.uint8)   # fundo escuro
+    cv2.rectangle(frame, (20, 20), (170, 150), (150, 175, 190), -1)     # "pele": claro mas não branco
+    cv2.putText(frame, "LEGENDA", (210, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 0), 9)   # contorno
+    cv2.putText(frame, "LEGENDA", (210, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 4)
+
+    region = {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+    mask = SubtitleFrameCleaner.mask_for(frame, [region])
+
+    # o texto (à direita) é marcado
+    assert cv2.countNonZero(mask[70:130, 205:430]) > 500
+    # o bloco claro tipo pele (à esquerda) é quase todo poupado
+    skin = mask[20:150, 20:170]
+    assert cv2.countNonZero(skin) < 0.15 * skin.size
+    # e a máscara total fica longe de cobrir a faixa inteira
+    assert cv2.countNonZero(mask) < 0.30 * mask.size
+
+
 def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
     """Nenhum quadro pode se perder entre a leitura e a regravação.
 

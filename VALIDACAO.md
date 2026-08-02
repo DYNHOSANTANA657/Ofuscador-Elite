@@ -102,6 +102,24 @@ vídeo, com 600 quadros:
 
 O custo é cerca de 1,5x mais tempo de processamento.
 
+## Correção posterior — apagava a faixa inteira, não só a legenda
+
+Num vídeo real vertical (720x1280, 2 min) a remoção parava de recodificar bem,
+mas apagava toda a faixa inferior — mão, peito, pescoço — porque a máscara
+preenchia o retângulo inteiro da região. Eram as "falhas exageradas".
+
+Correção: a máscara passou a marcar só as letras dentro do retângulo. Legendas
+gravadas são texto claro (branco ou amarelo) com contorno escuro; o detector isola
+esses traços por cor mais o contorno vizinho, ou, sem contorno, por componentes
+claros e compactos do tamanho de letra. Fundo claro grande (pele, parede) é
+descartado pelo tamanho. A máscara é então engordada o suficiente para engolir o
+contorno e a sombra da letra, senão sobrava o fantasma da borda.
+
+Medido no trecho pior do vídeo (22-38s, 480 quadros): a cobertura da faixa caiu de
+100% (retângulo cheio) para cerca de 20% (as palavras), a legenda saiu sem fantasma
+e a mão, os dedos e o peito ficaram com o pixel original. Quando não há texto claro
+na região, nada é marcado — não há mais super-apagamento.
+
 ## macOS
 
 O construtor `build-macos.command` foi atualizado para gerar arm64 e Intel, verificar Rosetta 2, libx264, RapidOCR, ONNX Runtime e LaMa. A validação integral dos aplicativos macOS ainda precisa ser executada em um Mac Apple Silicon com Rosetta 2, conforme previsto no plano.
