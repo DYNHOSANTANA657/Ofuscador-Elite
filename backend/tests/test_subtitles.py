@@ -103,6 +103,21 @@ def test_mask_is_solid_per_line_and_keeps_lines_apart() -> None:
     assert gap_rows, "as duas linhas de legenda se fundiram num bloco só"
 
 
+def test_mask_covers_isolated_bright_speck() -> None:
+    """Um pingo claro solto (acento, tittle do 'i', resto de palavra anterior) também
+    entra na máscara. Sem isso ele sobrava como um pontinho amarelo/branco no resultado.
+    O halo por glifo garante cobertura mesmo quando o pingo não forma linha."""
+    import cv2
+
+    height, width = 240, 480
+    frame = np.full((height, width, 3), (40, 40, 40), dtype=np.uint8)
+    # um único pingo amarelo isolado, longe de qualquer linha de texto
+    cv2.circle(frame, (240, 120), 4, (40, 230, 240), -1)
+    region = {"x": 0.0, "y": 0.0, "width": 1.0, "height": 1.0}
+    mask = SubtitleFrameCleaner.mask_for(frame, [region])
+    assert mask[120, 240] == 255, "o pingo claro solto não foi coberto pela máscara"
+
+
 def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
     """Nenhum quadro pode se perder entre a leitura e a regravação.
 

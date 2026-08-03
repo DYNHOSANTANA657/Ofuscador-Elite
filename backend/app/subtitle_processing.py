@@ -191,7 +191,13 @@ class SubtitleFrameCleaner:
             x0, y0 = max(0, x - pad_x), max(0, y - pad_y)
             x1, y1 = min(width, x + w + pad_x), min(height, y + h + pad_y)
             out[y0:y1, x0:x1] = 255
-        return out
+        # Rede de segurança: todo pixel claro de texto detectado (inclusive pingos soltos
+        # que não formaram linha — o "i", um acento, um resto de palavra anterior) entra na
+        # máscara com uma folga que engole o contorno escuro. É só um halo por glifo, não um
+        # bloco grande, então não dissolve tarja colorida (o fundo da tarja não é claro).
+        halo = cv2.dilate(keep, cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, ((pad_x * 2 + 1), (pad_y * 2 + 1))))
+        return cv2.max(out, halo)
 
     @staticmethod
     def mask_for(frame, regions: list[dict[str, object]]):
@@ -345,6 +351,23 @@ class SubtitleFrameCleaner:
             self._propagated = 0
         if mask is None or cv2.countNonZero(mask) == 0:
             return frame.copy()
+        # Casa o TOM do remendo com o fundo em volta antes de colar. Sem isto, a média de
+        # brilho da reconstrução (ou do remendo propagado, que escurece um pouco a cada
+        # warp) fica um tico diferente da roupa e a borda da máscara vira uma LINHA
+        # horizontal — a "emenda". Desloca o remendo pela diferença de média entre um anel
+        # fino de fundo REAL (fora) e o anel do remendo (dentro), colado à borda. Some a
+        # emenda sem borrar a textura; o deslocamento é limitado para nunca inventar cor.
+        ring = max(3, int(round(min(frame.shape[:2]) * 0.010)) | 1)
+        elem = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring, ring))
+        outer = cv2.subtract(cv2.dilate(mask, elem), mask)
+        inner = cv2.subtract(mask, cv2.erode(mask, elem))
+        if cv2.countNonZero(outer) > 20 and cv2.countNonZero(inner) > 20:
+            background = frame.astype(np.float32)[outer > 0].mean(axis=0)
+            patch = candidate.astype(np.float32)[inner > 0].mean(axis=0)
+            shift = np.clip(background - patch, -40.0, 40.0)
+            candidate = np.clip(
+                candidate.astype(np.float32) + shift * (mask > 0)[..., None], 0, 255
+            ).astype(np.uint8)
         feather_size = max(3, int(round(min(frame.shape[:2]) * 0.009)) | 1)
         alpha = cv2.GaussianBlur(mask, (feather_size, feather_size), 0).astype(np.float32)[..., None] / 255.0
         return np.clip(frame.astype(np.float32) * (1 - alpha) + candidate.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
