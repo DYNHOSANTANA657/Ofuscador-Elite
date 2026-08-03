@@ -50,11 +50,16 @@ class SubtitleFrameCleaner:
     def __init__(self, models: SubtitleModelManager, fps: float = 30.0) -> None:
         self.models = models
         self._session = None
-        # A recuperação temporal deforma o quadro JÁ limpo do passo anterior. Repetir
-        # isso indefinidamente empilha o erro de cada deformação: numa legenda de vinte
-        # segundos o mesmo remendo era arrastado por centenas de quadros e virava uma
-        # mancha. Refazer o LaMa a cada ~1 segundo limita o acúmulo.
-        self._max_propagation = max(4, int(round(fps)))
+        self._gpu = False
+        self._detector = None   # None = ainda não tentou; False = indisponível
+        self._last_mask = None  # máscara do último quadro-chave, para propagar
+        # A recuperação temporal (fluxo óptico) deforma o quadro JÁ limpo do passo
+        # anterior e ACUMULA erro: com a mão passando sobre a legenda o remendo arrastava
+        # e virava uma faixa suja. Por isso o padrão é rodar o LaMa em TODO quadro
+        # (`_max_propagation = 0`), o que só é viável com GPU. Sem GPU (ou no modo
+        # "rapida") cai-se numa janela de propagação para não ficar lento demais.
+        self._cpu_window = max(4, int(round(fps / 2.0)))
+        self._max_propagation = self._cpu_window
         self._propagated = 0
 
     def _session_for_lama(self):
@@ -66,11 +71,36 @@ class SubtitleFrameCleaner:
         try:
             import onnxruntime as ort
             options = ort.SessionOptions()
-            options.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))
+            options.intra_op_num_threads = max(1, os.cpu_count() or 1)
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
             options.enable_cpu_mem_arena = False
-            self._session = ort.InferenceSession(str(model_dir / "lama_fp32.onnx"), sess_options=options, providers=["CPUExecutionProvider"])
+            available = set(ort.get_available_providers())
+            wanted: list[str] = []
+            if os.environ.get("OFUSCADOR_FORCE_CPU") != "1":
+                for name in ("DmlExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider"):
+                    if name in available:
+                        wanted.append(name)
+            providers = wanted + ["CPUExecutionProvider"]
+            try:
+                self._session = ort.InferenceSession(str(model_dir / "lama_fp32.onnx"), sess_options=options, providers=providers)
+            except Exception:
+                # Placa incompatível: volta para CPU em vez de derrubar o processamento.
+                self._session = ort.InferenceSession(str(model_dir / "lama_fp32.onnx"), sess_options=options, providers=["CPUExecutionProvider"])
+            active = self._session.get_providers()
+            self._gpu = bool(active) and active[0] != "CPUExecutionProvider"
+        except SubtitleRemovalError:
+            raise
         except Exception as exc:
             raise SubtitleRemovalError("O modelo LaMa não pôde ser iniciado. Reinstale o pacote de IA.") from exc
+        # Modo de reconstrução: "alta" = LaMa todo quadro (mais nítido/discreto); "rapida"
+        # = propaga (mais veloz); "auto" = alta no GPU, rápida no CPU.
+        mode = os.environ.get("OFUSCADOR_RECON_MODE", "auto").strip().lower()
+        if mode == "alta":
+            self._max_propagation = 0
+        elif mode == "rapida":
+            self._max_propagation = self._cpu_window
+        else:
+            self._max_propagation = 0 if self._gpu else self._cpu_window
         return self._session
 
     @staticmethod
@@ -158,16 +188,106 @@ class SubtitleFrameCleaner:
         kernel = max(3, int(round(min(height, width) * 0.006)) | 1)
         return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel)))
 
+    def _text_detector(self):
+        """Detector de texto DBNet do RapidOCR (mesmo pacote do exame). Acha texto de
+        QUALQUER cor pela forma, não pela cor. Só detecção, sem reconhecer as letras."""
+        if self._detector is not None:
+            return self._detector or None
+        model_dir = self.models.models_dir()
+        if not model_dir:
+            self._detector = False
+            return None
+        try:
+            from rapidocr import RapidOCR
+            self._detector = RapidOCR(params={
+                "Global.model_root_dir": str(model_dir),
+                "Global.text_score": 0.4,
+                "Global.log_level": "warning",
+            })
+        except Exception:
+            self._detector = False
+            return None
+        return self._detector
+
+    def _detect_boxes(self, crop):
+        """Caixas de texto (qualquer cor) no recorte, ou None se o detector faltar."""
+        import numpy as np
+        detector = self._text_detector()
+        if detector is None or crop.size == 0:
+            return None
+        try:
+            result = detector(crop, use_det=True, use_rec=False, use_cls=False)
+        except Exception:
+            return None
+        boxes = getattr(result, "boxes", None)
+        if boxes is None:
+            return []
+        return [np.asarray(box, dtype=np.float32) for box in boxes]
+
+    def _subtitle_mask(self, frame, regions: list[dict[str, object]]):
+        """Máscara do texto por REGIÃO: detector (qualquer cor) reforçado pela detecção
+        de cor branco/amarelo. Cada caixa detectada vira um bloco cheio por linha — o
+        que mata o fantasma da borda e mantém a discrição. Se o detector não estiver
+        disponível, usa só a cor (comportamento da 1.3.3)."""
+        import cv2
+        import numpy as np
+        height, width = frame.shape[:2]
+        mask = np.zeros((height, width), dtype=np.uint8)
+        for region in regions:
+            x1 = max(0, min(width - 1, int(float(region["x"]) * width)))
+            y1 = max(0, min(height - 1, int(float(region["y"]) * height)))
+            x2 = max(x1 + 1, min(width, int(round((float(region["x"]) + float(region["width"])) * width))))
+            y2 = max(y1 + 1, min(height, int(round((float(region["y"]) + float(region["height"])) * height))))
+            crop = frame[y1:y2, x1:x2]
+            # Máscara por COR (branco/amarelo): justa e já ótima na 1.3.3 — preserva
+            # tarjas coloridas. É a base.
+            local = self._text_strokes(crop)
+            boxes = self._detect_boxes(crop)
+            if boxes:
+                ch, cw = crop.shape[:2]
+                for quad in boxes:
+                    bxs, bys = quad[:, 0], quad[:, 1]
+                    box_h = float(bys.max() - bys.min())
+                    pad_x = max(2, int(box_h * 0.30))
+                    pad_y = max(1, int(box_h * 0.12))
+                    xa = max(0, int(bxs.min()) - pad_x)
+                    xb = min(cw, int(bxs.max()) + pad_x)
+                    ya = max(0, int(bys.min()) - pad_y)
+                    yb = min(ch, int(bys.max()) + pad_y)
+                    if xb <= xa or yb <= ya:
+                        continue
+                    # Se a COR já cobre bem esta caixa, é texto branco/amarelo: confia na
+                    # máscara de cor (mais justa, não engrossa a tarja). Só usa a caixa do
+                    # detector quando a cor NÃO pegou — aí é legenda de outra cor.
+                    box_area = (yb - ya) * (xb - xa)
+                    if int(cv2.countNonZero(local[ya:yb, xa:xb])) > 0.12 * box_area:
+                        continue
+                    local[ya:yb, xa:xb] = 255
+            mask[y1:y2, x1:x2] = cv2.max(mask[y1:y2, x1:x2], local)
+        kernel = max(3, int(round(min(height, width) * 0.006)) | 1)
+        return cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel)))
+
+    def _region_bbox(self, shape, regions):
+        height, width = shape[:2]
+        xs1, ys1, xs2, ys2 = [], [], [], []
+        for region in regions:
+            xs1.append(max(0, min(width - 1, int(float(region["x"]) * width))))
+            ys1.append(max(0, min(height - 1, int(float(region["y"]) * height))))
+            xs2.append(max(1, min(width, int(round((float(region["x"]) + float(region["width"])) * width)))))
+            ys2.append(max(1, min(height, int(round((float(region["y"]) + float(region["height"])) * height)))))
+        return min(xs1), min(ys1), max(xs2), max(ys2)
+
     def clean(self, frame, regions: list[dict[str, object]], previous_input, previous_clean):
         import cv2
         import numpy as np
         if not regions:
             return frame.copy()
-        mask = self.mask_for(frame, regions)
         candidate = None
+        mask = None
         can_propagate = (
             previous_input is not None
             and previous_clean is not None
+            and self._last_mask is not None
             and previous_input.shape == frame.shape
             and self._propagated < self._max_propagation
         )
@@ -175,37 +295,49 @@ class SubtitleFrameCleaner:
             current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             previous_gray = cv2.cvtColor(previous_input, cv2.COLOR_BGR2GRAY)
             scene_change = float(np.mean(cv2.absdiff(current_gray, previous_gray)))
-            if scene_change < 30:
-                flow = cv2.calcOpticalFlowFarneback(current_gray, previous_gray, None, 0.5, 3, 21, 3, 5, 1.2, 0)
-                grid_x, grid_y = np.meshgrid(np.arange(frame.shape[1], dtype=np.float32), np.arange(frame.shape[0], dtype=np.float32))
-                candidate = cv2.remap(previous_clean, grid_x + flow[..., 0], grid_y + flow[..., 1], cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            # Gate LOCAL na CAIXA do usuário: se a área da legenda mudou muito (a mão
+            # passou por cima, a cena mexeu ali), NÃO propague — o warp arrastaria pixels
+            # da borda e deixaria uma faixa suja. Refaz o LaMa, que reconstrói limpo.
+            rx1, ry1, rx2, ry2 = self._region_bbox(frame.shape, regions)
+            region_change = float(np.mean(cv2.absdiff(
+                current_gray[ry1:ry2, rx1:rx2], previous_gray[ry1:ry2, rx1:rx2])))
+            if scene_change < 30 and region_change < 12:
+                # Fluxo óptico em meia resolução: ~4x mais rápido, sem perda perceptível.
+                fh, fw = current_gray.shape
+                cur_s = cv2.resize(current_gray, (fw // 2, fh // 2))
+                prev_s = cv2.resize(previous_gray, (fw // 2, fh // 2))
+                flow_s = cv2.calcOpticalFlowFarneback(cur_s, prev_s, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                flow = cv2.resize(flow_s, (fw, fh)) * 2.0
+                grid_x, grid_y = np.meshgrid(np.arange(fw, dtype=np.float32), np.arange(fh, dtype=np.float32))
+                map_x, map_y = grid_x + flow[..., 0], grid_y + flow[..., 1]
+                candidate = cv2.remap(previous_clean, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                # A máscara acompanha o texto que se move (karaokê) pelo mesmo fluxo.
+                mask = cv2.remap(self._last_mask, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT)
+                self._propagated += 1
         if candidate is None:
+            # Quadro-chave: detecta o texto (qualquer cor) e reconstrói com o LaMa.
+            mask = self._subtitle_mask(frame, regions)
+            self._last_mask = mask
+            if cv2.findNonZero(mask) is None:
+                return frame.copy()
             candidate = self._lama(frame, mask)
             self._propagated = 0
-        else:
-            self._propagated += 1
+        if mask is None or cv2.countNonZero(mask) == 0:
+            return frame.copy()
         feather_size = max(3, int(round(min(frame.shape[:2]) * 0.009)) | 1)
         alpha = cv2.GaussianBlur(mask, (feather_size, feather_size), 0).astype(np.float32)[..., None] / 255.0
         return np.clip(frame.astype(np.float32) * (1 - alpha) + candidate.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
 
-    def _lama(self, frame, mask):
+    def _run_lama_512(self, tile_bgr, tile_mask):
+        """Reconstrói um bloco 512x512 exato (o modelo LaMa é fixo nesse tamanho).
+
+        Recebe BGR uint8 e a máscara uint8, devolve BGR uint8 512x512.
+        """
         import cv2
         import numpy as np
-        points = cv2.findNonZero(mask)
-        if points is None:
-            return frame.copy()
-        x, y, width, height = cv2.boundingRect(points)
-        context = max(48, int(max(width, height) * 0.55))
-        x1, y1 = max(0, x - context), max(0, y - context)
-        x2, y2 = min(frame.shape[1], x + width + context), min(frame.shape[0], y + height + context)
-        crop = frame[y1:y2, x1:x2]
-        crop_mask = mask[y1:y2, x1:x2]
-        if crop.size == 0:
-            raise SubtitleRemovalError("A região de legenda não pôde ser preparada para a IA.")
-        image_512 = cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB), (512, 512), interpolation=cv2.INTER_AREA)
-        mask_512 = cv2.resize(crop_mask, (512, 512), interpolation=cv2.INTER_NEAREST)
-        image_input = np.transpose(image_512.astype(np.float32) / 255.0, (2, 0, 1))[None]
-        mask_input = (mask_512.astype(np.float32) / 255.0)[None, None]
+        rgb = cv2.cvtColor(tile_bgr, cv2.COLOR_BGR2RGB)
+        image_input = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[None]
+        mask_input = (tile_mask.astype(np.float32) / 255.0)[None, None]
         session = self._session_for_lama()
         inputs = session.get_inputs()
         names = {item.name.lower(): item.name for item in inputs}
@@ -220,7 +352,37 @@ class SubtitleFrameCleaner:
             result = np.transpose(result, (1, 2, 0))
         if float(np.nanmax(result)) <= 1.5:
             result = result * 255.0
-        result = cv2.cvtColor(np.clip(result, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        return cv2.cvtColor(np.clip(result, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    def _lama(self, frame, mask):
+        """Reconstrói o fundo sob a máscara com o LaMa (512x512).
+
+        Recorta a região do texto com uma folga de contexto e redimensiona para 512.
+        A folga é MODERADA de propósito: contexto grande demais faz o LaMa preencher a
+        legenda com o que domina em volta (ex.: a parede atrás de uma tarja colorida,
+        dissolvendo a tarja); contexto local o bastante deixa a cor de fundo mandar
+        (o vermelho da tarja continua vermelho, a camisa continua camisa). O rastro que
+        aparecia em roupa lisa não vinha daqui, e sim da propagação temporal (resolvida
+        em `clean`), então este caminho reconstrói limpo quadro a quadro.
+        """
+        import cv2
+        points = cv2.findNonZero(mask)
+        if points is None:
+            return frame.copy()
+        x, y, width, height = cv2.boundingRect(points)
+        # Contexto pela ALTURA do texto, não pela largura: numa tarja larga, contexto
+        # proporcional à largura subiria fundo na parede acima e o LaMa dissolveria a
+        # tarja. Preso à altura, o recorte fica junto da legenda e a cor de fundo manda.
+        context = max(40, int(height * 0.6))
+        x1, y1 = max(0, x - context), max(0, y - context)
+        x2, y2 = min(frame.shape[1], x + width + context), min(frame.shape[0], y + height + context)
+        crop = frame[y1:y2, x1:x2]
+        crop_mask = mask[y1:y2, x1:x2]
+        if crop.size == 0:
+            raise SubtitleRemovalError("A região de legenda não pôde ser preparada para a IA.")
+        image_512 = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA)
+        mask_512 = cv2.resize(crop_mask, (512, 512), interpolation=cv2.INTER_NEAREST)
+        result = self._run_lama_512(image_512, mask_512)
         result = cv2.resize(result, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_CUBIC)
         candidate = frame.copy()
         candidate[y1:y2, x1:x2] = result
@@ -261,7 +423,7 @@ def remove_burned_subtitles(
     encode_command = [
         find_binary("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-video_size", f"{width}x{height}", "-framerate", rate, "-i", "pipe:0", "-an",
-        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
         "-fps_mode", "cfr", "-movflags", "+faststart", str(destination),
     ]
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

@@ -178,6 +178,15 @@ def self_test() -> int:
         "subtitle_runtime": subtitle_runtime,
     }
     print(json.dumps(checks))
+    # Linha informativa: qual acelerador o LaMa usaria (não conta para passar/falhar,
+    # já que o CPU é um fallback válido). Serve para o build/registro confirmar a GPU.
+    try:
+        import onnxruntime as ort
+        available = list(ort.get_available_providers())
+        gpu = next((name for name in ("DmlExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider") if name in available), "cpu")
+        print(json.dumps({"lama_provider": gpu, "providers": available}))
+    except Exception:
+        pass
     return 0 if all(checks.values()) else 1
 
 

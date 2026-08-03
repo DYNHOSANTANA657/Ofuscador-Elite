@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $BuildRoot = Join-Path $ProjectRoot ".build-windows"
 $FinalDirectory = Join-Path $ProjectRoot "dist"
-$FinalZip = Join-Path $FinalDirectory "OfuscadorElite-Windows-x64-v1.3.3.zip"
+$FinalZip = Join-Path $FinalDirectory "OfuscadorElite-Windows-x64-v1.4.0.zip"
 
 if (Test-Path -LiteralPath $BuildRoot) { throw "A pasta temporária $BuildRoot já existe. Renomeie ou remova essa pasta antes de reconstruir." }
 if (Test-Path -LiteralPath $FinalZip) { throw "O arquivo $FinalZip já existe. Ele não será substituído." }

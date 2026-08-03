@@ -5,7 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_ROOT="$PROJECT_ROOT/.build-macos"
 DIST_ROOT="$PROJECT_ROOT/dist"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-VERSION="1.3.3"
+VERSION="1.4.0"
 # Runners macOS do GitHub Actions não trazem Rosetta 2 nem um Python universal2,
 # então o pacote Intel não pode ser gerado lá. Com OFUSCADOR_SKIP_INTEL=1 o
 # construtor entrega só o arm64 em vez de abortar.

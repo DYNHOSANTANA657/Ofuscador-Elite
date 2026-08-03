@@ -131,11 +131,12 @@ def test_reconstruction_preserves_every_frame(tmp_path: Path) -> None:
 
 
 def test_temporal_recovery_stops_before_the_patch_smears() -> None:
-    """A recuperação temporal não pode ser propagada sem limite.
+    """A recuperação temporal (modo rápido/CPU) não pode ser propagada sem limite.
 
     Cada propagação deforma o remendo do quadro anterior. Sem um teto, uma legenda
     de vinte segundos arrastava o mesmo remendo por centenas de quadros e o
-    resultado virava uma mancha. Passado o teto, o LaMa precisa rodar de novo.
+    resultado virava uma mancha. Passado o teto, o LaMa precisa rodar de novo. Com a
+    região estável (quadro anterior igual ao atual) a propagação de fato ocorre.
     """
     import cv2
 
@@ -146,13 +147,17 @@ def test_temporal_recovery_stops_before_the_patch_smears() -> None:
     region = {"x": 0.2, "y": 0.55, "width": 0.65, "height": 0.35, "startMs": 0, "endMs": 60_000, "enabled": True}
 
     cleaner = SubtitleFrameCleaner(NoModelNeeded(), fps=10.0)
-    assert cleaner._max_propagation == 10
-    for step in range(10):
-        cleaner.clean(frame, [region], background, background)
+    # Sem modelo, a sessão nunca é criada: o teto fica na janela padrão de CPU (fps/2).
+    assert cleaner._max_propagation == 5
+    # Simula um quadro-chave anterior já resolvido, para exercitar só a propagação.
+    cleaner._last_mask = SubtitleFrameCleaner.mask_for(frame, [region])
+    for step in range(5):
+        # quadro anterior IGUAL ao atual: a área da legenda está estável e propaga.
+        cleaner.clean(frame, [region], frame, background)
         assert cleaner._propagated == step + 1
     # Esgotado o teto, o caminho volta para o LaMa — que aqui não está instalado.
     with pytest.raises(SubtitleRemovalError, match="não está instalado"):
-        cleaner.clean(frame, [region], background, background)
+        cleaner.clean(frame, [region], frame, background)
 
 
 def test_temporal_recovery_changes_only_mask_area() -> None:
@@ -162,7 +167,10 @@ def test_temporal_recovery_changes_only_mask_area() -> None:
     current = background.copy()
     cv2.putText(current, "TESTE", (45, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
     region = {"x": 0.2, "y": 0.55, "width": 0.65, "height": 0.35, "startMs": 0, "endMs": 1000, "enabled": True}
-    cleaned = SubtitleFrameCleaner(NoModelNeeded()).clean(current, [region], background, background)
+    # quadro anterior IGUAL ao atual (região estável) => propaga o limpo anterior.
+    cleaner = SubtitleFrameCleaner(NoModelNeeded())
+    cleaner._last_mask = SubtitleFrameCleaner.mask_for(current, [region])
+    cleaned = cleaner.clean(current, [region], current, background)
     mask = SubtitleFrameCleaner.mask_for(current, [region])
     assert np.array_equal(cleaned[mask == 0], current[mask == 0])
     assert float(np.mean(np.abs(cleaned[mask > 0].astype(float) - current[mask > 0].astype(float)))) > 1
