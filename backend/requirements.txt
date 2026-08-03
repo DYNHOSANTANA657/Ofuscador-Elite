@@ -3,11 +3,10 @@ uvicorn==0.35.0
 python-multipart==0.0.20
 keyring==25.6.0
 piper-tts==1.4.2
-# No Windows usamos a build DirectML (roda o LaMa na GPU, com volta pro CPU). Ela
-# fornece o mesmo módulo `onnxruntime` com os providers DmlExecutionProvider + CPU.
-# No macOS o onnxruntime padrão já traz o CoreMLExecutionProvider (GPU/Neural Engine).
-onnxruntime-directml==1.24.4; sys_platform == "win32"
-onnxruntime==1.28.0; sys_platform != "win32"
+# onnxruntime padrão. No macOS essa build já traz o CoreMLExecutionProvider, que o app
+# testa em runtime (com sonda) e usa se der certo, senão volta pro CPU. No Windows não
+# usamos DirectML: ele não executa as camadas de convolução de Fourier (FFC) do LaMa.
+onnxruntime==1.28.0
 numpy==2.2.6
 opencv-python==4.12.0.88
 rapidocr==3.9.1

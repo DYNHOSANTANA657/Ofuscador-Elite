@@ -80,14 +80,21 @@ class SubtitleFrameCleaner:
                 for name in ("DmlExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider"):
                     if name in available:
                         wanted.append(name)
-            providers = wanted + ["CPUExecutionProvider"]
-            try:
-                self._session = ort.InferenceSession(str(model_dir / "lama_fp32.onnx"), sess_options=options, providers=providers)
-            except Exception:
-                # Placa incompatível: volta para CPU em vez de derrubar o processamento.
-                self._session = ort.InferenceSession(str(model_dir / "lama_fp32.onnx"), sess_options=options, providers=["CPUExecutionProvider"])
-            active = self._session.get_providers()
-            self._gpu = bool(active) and active[0] != "CPUExecutionProvider"
+            model_path = str(model_dir / "lama_fp32.onnx")
+            self._session = None
+            if wanted:
+                try:
+                    trial = ort.InferenceSession(model_path, sess_options=options, providers=wanted + ["CPUExecutionProvider"])
+                    self._probe_lama(trial)  # roda uma inferência de verdade na GPU
+                    self._session = trial
+                    self._gpu = trial.get_providers()[0] != "CPUExecutionProvider"
+                except Exception:
+                    # A GPU não executa este modelo (ex.: DirectML não suporta as camadas
+                    # FFC do LaMa). Cai para CPU em vez de quebrar no meio do vídeo.
+                    self._session = None
+            if self._session is None:
+                self._session = ort.InferenceSession(model_path, sess_options=options, providers=["CPUExecutionProvider"])
+                self._gpu = False
         except SubtitleRemovalError:
             raise
         except Exception as exc:
@@ -102,6 +109,20 @@ class SubtitleFrameCleaner:
         else:
             self._max_propagation = 0 if self._gpu else self._cpu_window
         return self._session
+
+    @staticmethod
+    def _probe_lama(session) -> None:
+        """Roda uma inferência 512x512 mínima. Se o provider (GPU) não executar de fato
+        este modelo, lança — e quem chama volta para o CPU antes de começar o vídeo."""
+        import numpy as np
+        inputs = session.get_inputs()
+        names = {item.name.lower(): item.name for item in inputs}
+        image_name = names.get("image", inputs[0].name)
+        mask_name = names.get("mask", inputs[1].name if len(inputs) > 1 else inputs[0].name)
+        image = np.zeros((1, 3, 512, 512), dtype=np.float32)
+        mask = np.zeros((1, 1, 512, 512), dtype=np.float32)
+        mask[..., 240:272, 200:312] = 1.0
+        session.run(None, {image_name: image, mask_name: mask})
 
     @staticmethod
     def _text_strokes(roi):
