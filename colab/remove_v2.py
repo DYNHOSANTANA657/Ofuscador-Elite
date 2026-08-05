@@ -1,5 +1,11 @@
-# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.4
+# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.4.1
 # Roda no runtime do Colab (auto-baixa LaMa, auto-instala rapidocr, auto-pede o video).
+#
+# v2.4.1 - conserto do buraco do rosto: na v2.4 o Haar dava falso-positivo no colarinho/
+#   gravata e o buraco protegido cobria o PEITO todo (legenda do peito nao seria apagada).
+#   Agora o buraco FIXO exige FACE_FREQ alto (0.30) E rosto na METADE DE CIMA -> buraco so
+#   no rosto principal; peito/meio/rodape ficam apagaveis. Rosto de baixo (tela dividida)
+#   segue protegido pela trava DINAMICA por quadro.
 #
 # v2.4 - TELA TODA DE VERDADE (mata o "flash" da legenda no meio).
 #   A zona vermelha agora e a TELA INTEIRA (cima+meio+baixo), MENOS um buraco no ROSTO.
@@ -24,7 +30,7 @@ DIL          = 6        # dilatacao da mascara (engorda o texto p/ nao sobrar bo
 TEMPORAL_W   = 3        # quantas deteccoes recentes de OCR unir (tira o pisca; curto p/ nao arrastar)
 MIN_AREA     = 60
 N_SAMP       = 200      # amostras na PASSA 1 (agora so p/ mapear onde o ROSTO fica; rapido, sem OCR)
-FACE_FREQ    = 0.05     # fracao das amostras p/ um ponto virar "zona de rosto" protegida
+FACE_FREQ    = 0.30     # fracao das amostras p/ virar "rosto FIXO" protegido (ALTO = so o rosto principal; ignora falso-positivo esporadico no colarinho/gravata)
 MODEL_URL    = 'https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt'
 
 # ---------------- 1) video ----------------
@@ -102,12 +108,14 @@ HAS_FACE = not face_cascade.empty()
 def face_rects(bgr):
     if not HAS_FACE: return []
     g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    return face_cascade.detectMultiScale(g, 1.2, 5, minSize=(70, 70))
+    return face_cascade.detectMultiScale(g, 1.2, 5, minSize=(90, 90))   # rosto grande (menos falso-positivo)
 
-def stamp_face(dst, rects):                             # marca rosto: do cabelo ate o queixo
+def stamp_face(dst, rects, only_upper=False):           # marca rosto: do cabelo ate o queixo
     for (x, y, w, h) in rects:
-        y0 = max(0, y - int(0.25 * h)); y1 = min(H, y + int(1.05 * h))
-        x0 = max(0, x - int(0.25 * w)); x1 = min(W, x + int(1.25 * w))
+        if only_upper and (y + 0.5 * h) > 0.50 * H:     # buraco FIXO: so rosto na METADE DE CIMA
+            continue                                    # (colarinho/gravata detectado como "rosto" fica de fora)
+        y0 = max(0, y - int(0.20 * h)); y1 = min(H, y + int(1.00 * h))
+        x0 = max(0, x - int(0.20 * w)); x1 = min(W, x + int(1.20 * w))
         dst[y0:y1, x0:x1] += 1
 
 facehits = np.zeros((H, W), np.float32)
@@ -117,7 +125,7 @@ for i in samp:
     cap.set(1, int(i)); ok, fr = cap.read()
     if not ok: continue
     last = fr
-    stamp_face(facehits, face_rects(fr))
+    stamp_face(facehits, face_rects(fr), only_upper=True)   # buraco FIXO: so rosto de cima
 facefreq = facehits / max(1, len(samp))
 if not HAS_FACE:
     print('AVISO: sem detector de rosto -> protegendo o MEIO por seguranca', flush=True)
@@ -125,7 +133,7 @@ if not HAS_FACE:
 
 # ZONA = TELA TODA, menos um buraco no ROSTO.
 face_zone = cv2.dilate((facefreq >= FACE_FREQ).astype(np.uint8),
-                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (35, 35))) > 0
+                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))) > 0
 zb = np.ones((H, W), bool)
 zb[face_zone] = False                                   # NUNCA apaga o rosto (olhos/oculos)
 print(f'ZONA: TELA TODA menos o rosto | rosto protegido: {int(face_zone.sum())} px ({100.0*face_zone.sum()/(H*W):.1f}%)', flush=True)
