@@ -663,6 +663,7 @@ export function EliteApp() {
       <header className="topbar">
         <a className="brand" href="#top" aria-label="Ofuscador Elite"><Logo/><span><b>OFUSCADOR</b><em>ELITE</em></span></a>
         <div className="top-actions">
+          <a className="colab-cta" href="https://colab.research.google.com/github/DYNHOSANTANA657/Ofuscador-Elite/blob/main/colab/Remover_Legenda_ProPainter_SEGURO.ipynb" target="_blank" rel="noopener noreferrer" title="Abrir o notebook do Colab (GPU grátis) para remover legenda — recomendado para PC sem GPU">☁ Rodar no Colab</a>
           <span className={`connection-pill ${backendOnline ? "online" : "offline"}`}><i />{backendOnline ? "Processamento local" : "Modo de apresentação"}</span>
           <button className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Abrir configurações">⚙</button>
         </div>

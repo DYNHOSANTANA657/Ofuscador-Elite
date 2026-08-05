@@ -34,6 +34,8 @@ button { color: inherit; }
 .connection-pill.offline i { background: #d79836; box-shadow: 0 0 0 4px #fff1d9; }
 .icon-button { width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 50%; background: #fff; cursor: pointer; font-size: 17px; transition: .2s; }
 .icon-button:hover { border-color: #abb7c4; transform: rotate(18deg); }
+.colab-cta { display: inline-flex; align-items: center; gap: 7px; background: var(--green); color: #fff; border: 1px solid var(--green); border-radius: 999px; padding: 9px 15px; font-size: 12px; font-weight: 700; text-decoration: none; transition: .2s; box-shadow: 0 3px 12px rgba(15,111,93,.18); }
+.colab-cta:hover { background: var(--green-dark); border-color: var(--green-dark); transform: translateY(-1px); box-shadow: 0 6px 16px rgba(15,111,93,.28); }
 
 .hero { max-width: 1212px; margin: 0 auto; padding: 72px 34px 60px; display: grid; grid-template-columns: 1.1fr .9fr; gap: 80px; align-items: center; }
 .eyebrow { display: inline-block; color: var(--green); font-size: 11px; letter-spacing: .18em; font-weight: 850; margin-bottom: 18px; }
