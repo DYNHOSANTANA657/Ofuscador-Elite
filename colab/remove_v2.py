@@ -119,9 +119,13 @@ heat /= len(samp); facefreq = facehits / len(samp)
 if not HAS_FACE:
     print('AVISO: sem detector de rosto -> protegendo o MEIO por seguranca', flush=True)
     facefreq[int(0.18 * H):int(0.58 * H), :] = 1.0
-zb = heat >= PERSIST                                    # texto GRANDE frequente = zona de legenda
-zb = cv2.dilate(zb.astype(np.uint8),
-                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MARGEM * 2 + 1, MARGEM * 2 + 1))) > 0
+# LINHAS onde texto GRANDE aparece com frequencia -> FAIXA de LARGURA TOTAL (de um lado ao
+# outro), garantindo que as PONTAS da legenda nao escapem. Melhor que uma zona so no formato.
+rowscore = heat.max(axis=1)
+onrows = np.convolve((rowscore >= PERSIST).astype(np.uint8),
+                     np.ones(MARGEM * 2 + 1, np.uint8), mode='same') > 0
+zb = np.zeros((H, W), bool)
+zb[onrows, :] = True                                    # LARGURA TOTAL nas linhas do texto
 face_zone = cv2.dilate((facefreq >= 0.10).astype(np.uint8),
                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))) > 0
 zb[face_zone] = False                                   # NUNCA apaga o rosto (olhos/oculos)
