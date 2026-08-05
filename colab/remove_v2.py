@@ -1,22 +1,30 @@
-# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.2
-# Roda no runtime QUENTE do Colab (video ja enviado, rapidocr ja instalado).
+# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.3
+# Roda no runtime do Colab (auto-baixa LaMa, auto-instala rapidocr, auto-pede o video).
 #
-# ESTRUTURA que funciona (v2.0): OCR no quadro INTEIRO + LaMa no quadro INTEIRO.
-# CORRECAO (v2.2): a ZONA e por LINHA e de LARGURA TOTAL -> pega as PONTAS das
-#                  legendas compridas. Mira as DUAS faixas (topo=tarja, baixo=legenda),
-#                  exclui o MEIO (rosto). LaMa apaga pelo redor -> sem borrao preto.
+# v2.3 - DETECTA LEGENDA EM QUALQUER POSICAO (cima / meio / baixo / bem embaixo).
+#   Nao usa mais faixa fixa. Como nao da p/ "apagar todo texto" (apagaria a BIBLIA),
+#   duas travas separam legenda de Biblia/fundo:
+#     (1) TAMANHO  - so conta caixa de texto ALTA (legenda tem letra grande;
+#                    a letrinha da Biblia e pequena -> fica protegida).      [MIN_TEXT_H]
+#     (2) PERSISTENCIA - so apaga onde texto GRANDE aparece com frequencia no
+#                    MESMO lugar (legenda fica parada; coisa passageira nao).  [PERSIST]
+#   + UNIAO TEMPORAL causal: quando detecta o texto, a mascara "gruda" nos
+#     quadros seguintes -> mata o "pisca" do karaoke (branco sobre camisa branca).
 
 import os, glob, cv2, numpy as np, urllib.request, torch
+from collections import deque
 from google.colab.patches import cv2_imshow
 
 # ---------------- parametros ----------------
-MAX_SEGUNDOS = 0       # 0 = video INTEIRO
-OCR_CADA     = 2       # 1 = OCR todo quadro (mais preciso). 2/3 = mais rapido (reusa a mascara)
-PERSIST      = 0.12
-DIL          = 5
-MIN_AREA     = 40
-N_SAMP       = 70
-MARGEM       = 14
+MAX_SEGUNDOS = 0        # 0 = video INTEIRO
+OCR_CADA     = 2        # OCR a cada N quadros (a uniao temporal cobre os pulados)
+PERSIST      = 0.05     # fracao dos quadros amostrados p/ um ponto virar "zona de legenda"
+MIN_TEXT_H   = 22       # ALTURA minima da caixa de texto, em px. PROTEGE a Biblia (letra pequena)
+DIL          = 6        # dilatacao da mascara (engorda o texto p/ nao sobrar borda)
+TEMPORAL_W   = 5        # quantas deteccoes recentes de OCR unir (mata o pisca do karaoke)
+MIN_AREA     = 60
+N_SAMP       = 160      # amostras na PASSA 1 (denso p/ achar legenda em QUALQUER posicao)
+MARGEM       = 10       # engorda a zona detectada
 MODEL_URL    = 'https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt'
 
 # ---------------- 1) video ----------------
@@ -54,7 +62,7 @@ def inpaint(bgr, mask):
     res = res * 255.0 if res.max() <= 1.5 else res
     return cv2.cvtColor(np.clip(res, 0, 255).astype('uint8')[:h, :w], cv2.COLOR_RGB2BGR)
 
-# ---------------- 3) detector de texto ----------------
+# ---------------- 3) detector de texto (com trava de TAMANHO) ----------------
 try:
     from rapidocr_onnxruntime import RapidOCR
 except ImportError:
@@ -62,6 +70,7 @@ except ImportError:
     os.system('pip install -q rapidocr_onnxruntime')
     from rapidocr_onnxruntime import RapidOCR
 ocr = RapidOCR()
+
 def boxes(img):
     out = ocr(img, use_det=True, use_rec=False, use_cls=False)
     res = out[0] if isinstance(out, tuple) else out
@@ -70,8 +79,10 @@ def boxes(img):
         for it in res:
             a = np.asarray(it, dtype=np.float32)
             b = a if (a.ndim == 2 and a.shape == (4, 2)) else np.asarray(it[0], dtype=np.float32)
-            if b.shape == (4, 2) and cv2.contourArea(b) >= MIN_AREA:
-                bs.append(b)
+            if b.shape != (4, 2):                 continue
+            if cv2.contourArea(b) < MIN_AREA:      continue
+            if (b[:, 1].max() - b[:, 1].min()) < MIN_TEXT_H: continue   # trava: texto PEQUENO (Biblia) fica de fora
+            bs.append(b)
     return bs
 
 # ---------------- 4) info do video ----------------
@@ -82,8 +93,8 @@ W = int(cap.get(3)); H = int(cap.get(4))
 N = total if MAX_SEGUNDOS == 0 else min(total, int(MAX_SEGUNDOS * fps))
 print(f'{total} quadros no total; processando {N}; {W}x{H} @ {fps:.1f}', flush=True)
 
-# ---------------- 5) PASSA 1: FAIXAS de texto fixo (por LINHA, largura total) ----------------
-rowhits = np.zeros(H, np.float32)
+# ---------------- 5) PASSA 1: ZONA de legenda em QUALQUER posicao (mapa 2D de frequencia) --------
+heat = np.zeros((H, W), np.float32)
 samp = np.unique(np.linspace(0, N - 1, min(N_SAMP, N)).astype(int))
 last = None
 for i in samp:
@@ -92,50 +103,38 @@ for i in samp:
     last = fr
     m = np.zeros((H, W), np.uint8)
     for b in boxes(fr): cv2.fillPoly(m, [b.astype(np.int32)], 255)
-    rowhits += (m.max(1) > 0)
-rowfreq = rowhits / len(samp)
-rowfreq[int(0.28 * H):int(0.54 * H)] = 0                 # exclui o MEIO (rosto)
-on = rowfreq >= PERSIST
-faixas = []; y = 0
-while y < H:
-    if on[y]:
-        y0 = y
-        while y < H and on[y]: y += 1
-        faixas.append([max(0, y0 - MARGEM), min(H, y + MARGEM)])
-    else:
-        y += 1
-merged = []
-for f in faixas:
-    if merged and f[0] - merged[-1][1] <= 12: merged[-1][1] = f[1]
-    else: merged.append(f)
-faixas = [tuple(f) for f in merged]
-print('FAIXAS de texto fixo (linhas):', faixas, flush=True)
-if not faixas:
-    raise SystemExit('Nenhuma faixa de texto fixo encontrada (baixe o PERSIST).')
-zb = np.zeros((H, W), bool)
-for (a, b) in faixas: zb[a:b, :] = True                   # LARGURA TOTAL nas linhas do texto
+    heat += (m > 0)
+heat /= len(samp)
+zb = heat >= PERSIST                                    # onde texto GRANDE aparece com frequencia
+zb = cv2.dilate(zb.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MARGEM * 2 + 1, MARGEM * 2 + 1))) > 0
+if not zb.any():
+    raise SystemExit('Nenhuma zona de legenda encontrada (baixe PERSIST ou MIN_TEXT_H).')
+print(f'ZONA de legenda: {int(zb.sum())} px ({100.0 * zb.sum() / (H * W):.1f}% da tela)', flush=True)
 ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (DIL * 2 + 1, DIL * 2 + 1))
 
 if last is not None:
     ov = last.copy()
-    for (a, b) in faixas: ov[a:b] = (0.4 * ov[a:b] + 0.6 * np.array([0, 0, 255])).astype('uint8')
-    print('PREVIA das FAIXAS (vermelho):'); cv2_imshow(ov)
+    ov[zb] = (0.4 * ov[zb].astype(np.float32) + 0.6 * np.array([0, 0, 255], np.float32)).astype('uint8')
+    print('PREVIA da ZONA (vermelho = vai apagar). ROSTO e BIBLIA devem ficar FORA do vermelho:')
+    cv2_imshow(ov)
 
-# ---------------- 6) PASSA 2: OCR (quadro inteiro) + LaMa (quadro inteiro) ----------------
+# ---------------- 6) PASSA 2: OCR (tela toda) + uniao temporal + LaMa ----------------
 os.makedirs('v2out', exist_ok=True)
-cap.set(1, 0); feito = 0; prev = None
+cap.set(1, 0); feito = 0
+hist = deque(maxlen=TEMPORAL_W)                          # ultimas deteccoes (listas de caixas)
 for i in range(N):
     ok, fr = cap.read()
     if not ok: break
-    if (i % OCR_CADA == 0) or (prev is None):
-        mm = np.zeros((H, W), np.uint8)
-        for b in boxes(fr): cv2.fillPoly(mm, [b.astype(np.int32)], 255)
-        mm = cv2.dilate(mm, ker); mm[~zb] = 0
-        prev = mm
-    else:
-        mm = prev
+    if i % OCR_CADA == 0:
+        hist.append(boxes(fr))                          # detecta na TELA TODA
+    mm = np.zeros((H, W), np.uint8)
+    for bs in hist:                                     # une as deteccoes recentes (mata o pisca)
+        for b in bs: cv2.fillPoly(mm, [b.astype(np.int32)], 255)
     if mm.any():
-        fr = inpaint(fr, mm)
+        mm = cv2.dilate(mm, ker); mm[~zb] = 0           # so apaga DENTRO da zona de legenda
+        if mm.any():
+            fr = inpaint(fr, mm)
     cv2.imwrite('v2out/%05d.png' % i, fr); feito += 1
     if (i + 1) % 50 == 0 or i == N - 1:
         print('  quadro', i + 1, '/', N, flush=True)
