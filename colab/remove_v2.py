@@ -10,8 +10,8 @@ import os, glob, cv2, numpy as np, urllib.request, torch
 from google.colab.patches import cv2_imshow
 
 # ---------------- parametros ----------------
-MAX_SEGUNDOS = 15      # 0 = video INTEIRO
-OCR_CADA     = 1       # 1 = OCR todo quadro (mais preciso). 2/3 = mais rapido (reusa a mascara)
+MAX_SEGUNDOS = 0       # 0 = video INTEIRO
+OCR_CADA     = 2       # 1 = OCR todo quadro (mais preciso). 2/3 = mais rapido (reusa a mascara)
 PERSIST      = 0.12
 DIL          = 5
 MIN_AREA     = 40
