@@ -161,13 +161,18 @@ def self_test() -> int:
     from .main import app
     from .media import has_h264_encoder
     from .piper_local import piper_available
+    # Guarda o MOTIVO de cada import que falhar: no pacote congelado do Windows o
+    # `onnxruntime`/`rapidocr`/`cv2` pode não carregar (falta de DLL), e sem a mensagem
+    # o build só dizia "autoteste falhou" sem apontar o quê.
+    subtitle_error = ""
     try:
         import cv2  # noqa: F401
         import onnxruntime  # noqa: F401
         import rapidocr  # noqa: F401
         subtitle_runtime = True
-    except Exception:
+    except Exception as exc:
         subtitle_runtime = False
+        subtitle_error = f"{type(exc).__name__}: {exc}"
     checks = {
         "api": app.title == "Ofuscador Elite",
         "interface": (resource_root() / "static" / "index.html").is_file(),
@@ -177,16 +182,28 @@ def self_test() -> int:
         "h264": has_h264_encoder(),
         "subtitle_runtime": subtitle_runtime,
     }
-    print(json.dumps(checks))
+    report: dict[str, object] = {"checks": checks, "passed": all(checks.values())}
+    if subtitle_error:
+        report["subtitle_error"] = subtitle_error
     # Linha informativa: qual acelerador o LaMa usaria (não conta para passar/falhar,
     # já que o CPU é um fallback válido). Serve para o build/registro confirmar a GPU.
     try:
         import onnxruntime as ort
         available = list(ort.get_available_providers())
         gpu = next((name for name in ("DmlExecutionProvider", "CoreMLExecutionProvider", "CUDAExecutionProvider") if name in available), "cpu")
-        print(json.dumps({"lama_provider": gpu, "providers": available}))
-    except Exception:
-        pass
+        report["lama_provider"] = gpu
+        report["providers"] = available
+    except Exception as exc:
+        report["providers_error"] = f"{type(exc).__name__}: {exc}"
+    print(json.dumps(report, ensure_ascii=False))
+    # Grava o relatório num arquivo quando o build pedir (OFUSCADOR_SELFTEST_LOG). Um app
+    # `--windowed` não tem console, então imprimir não basta para a CI ler o motivo.
+    log_path = os.environ.get("OFUSCADOR_SELFTEST_LOG")
+    if log_path:
+        try:
+            Path(log_path).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            pass
     return 0 if all(checks.values()) else 1
 
 

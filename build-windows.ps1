@@ -12,7 +12,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $BuildRoot = Join-Path $ProjectRoot ".build-windows"
 $FinalDirectory = Join-Path $ProjectRoot "dist"
-$FinalZip = Join-Path $FinalDirectory "OfuscadorElite-Windows-x64-v1.4.2.zip"
+$FinalZip = Join-Path $FinalDirectory "OfuscadorElite-Windows-x64-v1.5.0.zip"
 
 if (Test-Path -LiteralPath $BuildRoot) { throw "A pasta temporária $BuildRoot já existe. Renomeie ou remova essa pasta antes de reconstruir." }
 if (Test-Path -LiteralPath $FinalZip) { throw "O arquivo $FinalZip já existe. Ele não será substituído." }
@@ -120,8 +120,25 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot "licenses\AVISOS-DE-TERCEIROS.txt
 Copy-Item -LiteralPath (Join-Path $ProjectRoot "licenses\IA-Legendas-APACHE-MIT.txt") -Destination (Join-Path $Package "Licencas\IA-Legendas-APACHE-MIT.txt")
 
 $Executable = Join-Path $Package "OfuscadorElite\OfuscadorElite.exe"
-$SelfTestProcess = Start-Process -FilePath $Executable -ArgumentList "--self-test" -PassThru -Wait -WindowStyle Hidden
-if ($SelfTestProcess.ExitCode -ne 0) { throw "O teste interno do pacote Windows falhou." }
+$SelfTestLog = Join-Path $BuildRoot "selftest-report.json"
+if (Test-Path -LiteralPath $SelfTestLog) { Remove-Item -LiteralPath $SelfTestLog -Force }
+$env:OFUSCADOR_SELFTEST_LOG = $SelfTestLog
+try {
+    $SelfTestProcess = Start-Process -FilePath $Executable -ArgumentList "--self-test" -PassThru -Wait -WindowStyle Hidden
+} finally {
+    Remove-Item Env:\OFUSCADOR_SELFTEST_LOG -ErrorAction SilentlyContinue
+}
+$SelfTestExit = $SelfTestProcess.ExitCode
+Write-Host "Autoteste do pacote: código de saída $SelfTestExit"
+if (Test-Path -LiteralPath $SelfTestLog) {
+    Write-Host "Relatório do autoteste:"
+    Get-Content -LiteralPath $SelfTestLog -Raw | Write-Host
+    $SelfTestReport = Get-Content -LiteralPath $SelfTestLog -Raw
+} else {
+    Write-Host "O autoteste não gerou relatório — o executável provavelmente falhou ao INICIAR (falta de DLL ou erro de import antes do teste)."
+    $SelfTestReport = "(sem relatório; o executável não iniciou)"
+}
+if ($SelfTestExit -ne 0) { throw "O teste interno do pacote Windows falhou (código $SelfTestExit). $SelfTestReport" }
 # O autoteste cria a pasta de dados ao lado do executável. Ela não deve ir no ZIP:
 # o aplicativo a recria sozinho na primeira execução do usuário.
 $SelfTestData = Join-Path $Package "OfuscadorElite\Dados"

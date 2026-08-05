@@ -22,7 +22,7 @@ from .media import (
     unique_output,
 )
 from .piper_local import synthesize_piper
-from .subtitle_processing import remove_burned_subtitles
+from .subtitle_processing import remove_burned_subtitles, remove_burned_subtitles_auto
 
 
 @dataclass
@@ -170,13 +170,15 @@ class JobManager:
         self, *, upload_id: str, mode: str = "audio", text: str = "", voice: str = "", gender: str = "Male",
         volume_percent: int = 5, audio_stream_index: int | None = None, provider: str = "piper",
         remove_embedded: bool = False, remove_burned_in: bool = False, scan_id: str | None = None,
-        audio_asset_id: str | None = None,
+        burned_in_mode: str = "regions", audio_asset_id: str | None = None,
     ) -> JobRecord:
         upload = self.uploads.get(upload_id)
         if not upload:
             raise ValueError("O envio do vídeo expirou. Escolha o arquivo novamente.")
         if mode not in {"audio", "subtitles", "audio_and_subtitles"}:
             raise ValueError("O modo de processamento escolhido não é válido.")
+        if burned_in_mode not in {"regions", "auto"}:
+            raise ValueError("O modo de remoção de legenda gravada escolhido não é válido.")
         if self.scans.upload_in_use(upload_id):
             raise RuntimeError("Aguarde o exame de legendas terminar antes de processar o vídeo.")
         uses_audio = mode in {"audio", "audio_and_subtitles"}
@@ -198,9 +200,12 @@ class JobManager:
             if remove_burned_in:
                 if bool(upload.probe.get("hdr")):
                     raise ValueError("A remoção de legenda gravada em HDR está bloqueada nesta versão para preservar as cores.")
-                if not scan_id:
-                    raise ValueError("Examine e revise as regiões da legenda gravada antes de processar.")
-                self.scans.regions_for_job(scan_id, upload_id)
+                if burned_in_mode != "auto":
+                    # Modo CAIXA: exige o exame revisado. O modo AUTOMÁTICO (tela toda menos
+                    # rosto) não precisa de caixa nem de exame — vai direto ao processamento.
+                    if not scan_id:
+                        raise ValueError("Examine e revise as regiões da legenda gravada antes de processar.")
+                    self.scans.regions_for_job(scan_id, upload_id)
         with self._lock:
             if any(job.upload_id == upload_id and job.status in {"queued", "processing"} for job in self._jobs.values()):
                 raise RuntimeError("Este vídeo já está na fila de processamento.")
@@ -211,7 +216,7 @@ class JobManager:
             self._jobs[job.id] = job
         self._executor.submit(
             self._run, job, mode, text, voice, gender, volume_percent, audio_stream_index, provider,
-            remove_embedded, remove_burned_in, scan_id,
+            remove_embedded, remove_burned_in, scan_id, burned_in_mode,
         )
         return job
 
@@ -305,6 +310,7 @@ class JobManager:
     def _run(
         self, job: JobRecord, mode: str, text: str, voice: str, gender: str, volume_percent: int,
         audio_stream_index: int | None, provider: str, remove_embedded: bool, remove_burned_in: bool, scan_id: str | None,
+        burned_in_mode: str = "regions",
     ) -> None:
         upload = self.uploads.get(job.upload_id)
         if not upload:
@@ -334,7 +340,7 @@ class JobManager:
                 f"transfer {upload.probe['colorTransfer'] or '—'}{' · HDR' if upload.probe['hdr'] else ''} · "
                 f"{len(upload.audio_tracks)} faixa(s) de áudio · {len(upload.subtitle_tracks)} de legenda"
             )
-            self._log(job, f"[modo] {mode} · faixas separadas={remove_embedded} · gravada={remove_burned_in}")
+            self._log(job, f"[modo] {mode} · faixas separadas={remove_embedded} · gravada={remove_burned_in} ({burned_in_mode})")
             if uses_audio:
                 if provider == "file":
                     asset = self.audio.get(job.audio_asset_id or "")
@@ -363,15 +369,21 @@ class JobManager:
                 self._update(job, progress=14, message="Combinando vídeo e áudio")
                 self._run_ffmpeg(job, command, upload.duration, 14, 96, "Combinando vídeo e áudio")
             elif remove_burned_in:
-                assert scan_id is not None
-                regions = self.scans.regions_for_job(scan_id, upload.id)
                 self._update(job, progress=10 if uses_audio else 4, message="Reconstruindo o fundo sob as legendas")
                 lower = 12 if uses_audio else 5
                 upper = 82
-                stats = remove_burned_subtitles(
-                    upload.path, clean_video, upload.probe, regions, self.models,
-                    lambda fraction, message: self._update(job, progress=lower + fraction * (upper - lower), message=message),
-                )
+                report = lambda fraction, message: self._update(job, progress=lower + fraction * (upper - lower), message=message)
+                if burned_in_mode == "auto":
+                    # Receita AUTOMÁTICA (tela toda menos rosto), a mesma validada na Colab.
+                    stats = remove_burned_subtitles_auto(
+                        upload.path, clean_video, upload.probe, self.models, report,
+                    )
+                else:
+                    assert scan_id is not None
+                    regions = self.scans.regions_for_job(scan_id, upload.id)
+                    stats = remove_burned_subtitles(
+                        upload.path, clean_video, upload.probe, regions, self.models, report,
+                    )
                 self._log(
                     job,
                     f"[reconstrução] {int(stats['frames'])} de {int(stats['expectedFrames'])} quadros · "

@@ -10,7 +10,16 @@ import pytest
 from app.config import find_binary
 from app.media import probe_video
 from app.subtitle_models import SubtitleModelManager, _safe_member
-from app.subtitle_processing import SubtitleFrameCleaner, SubtitleRemovalError, regions_at, remove_burned_subtitles
+from app.subtitle_processing import (
+    SubtitleFrameCleaner,
+    SubtitleRemovalError,
+    _auto_params,
+    _load_face_cascade,
+    _stamp_face,
+    regions_at,
+    remove_burned_subtitles,
+    remove_burned_subtitles_auto,
+)
 from app.subtitles import validate_region
 
 
@@ -189,3 +198,74 @@ def test_temporal_recovery_changes_only_mask_area() -> None:
     mask = SubtitleFrameCleaner.mask_for(current, [region])
     assert np.array_equal(cleaned[mask == 0], current[mask == 0])
     assert float(np.mean(np.abs(cleaned[mask > 0].astype(float) - current[mask > 0].astype(float)))) > 1
+
+
+# --------------------------------------------------------------------------
+# Modo AUTOMÁTICO "tela toda menos rosto" (receita da Colab, v2.4.1).
+# --------------------------------------------------------------------------
+def test_auto_params_match_validated_recipe_and_override(monkeypatch) -> None:
+    """Os valores-padrão têm de ser exatamente os da v2.4.1 validada; as opções e as
+    variáveis de ambiente podem sobrepor para trocar velocidade por fidelidade."""
+    params = _auto_params()
+    assert params["ocr_cada"] == 1        # OCR em TODO quadro (pega o flash de 1 quadro)
+    assert params["min_text_h"] == 22     # protege o texto pequeno da Bíblia
+    assert params["dil"] == 6
+    assert params["temporal_w"] == 3
+    assert params["min_area"] == 60
+    assert params["n_samp"] == 200
+    assert abs(float(params["face_freq"]) - 0.30) < 1e-9
+
+    assert _auto_params({"minTextH": 40})["min_text_h"] == 40
+    monkeypatch.setenv("OFUSCADOR_OCR_CADA", "4")
+    assert _auto_params()["ocr_cada"] == 4
+    # a opção explícita ganha da variável de ambiente
+    assert _auto_params({"ocrEvery": 2})["ocr_cada"] == 2
+
+
+def test_stamp_face_expands_box_and_can_ignore_lower_half() -> None:
+    height, width = 200, 400
+    target = np.zeros((height, width), np.float32)
+    _stamp_face(target, [(100, 60, 40, 40)], height, width)
+    # caixa ampliada: y 52..99, x 92..147 (folga de 20% em volta) recebe +1
+    assert target[70, 120] == 1
+    assert target[10, 10] == 0
+    # only_upper descarta rosto cuja metade cai na parte de baixo da tela
+    lower = np.zeros((height, width), np.float32)
+    _stamp_face(lower, [(100, 150, 40, 40)], height, width, only_upper=True)
+    assert lower.sum() == 0
+
+
+def test_load_face_cascade_uses_bundled_opencv_data() -> None:
+    """O XML do Haar acompanha o opencv-python; o carregador tem de encontrá-lo mesmo sem
+    a pasta de modelos (models_dir() == None), senão o rosto ficaria sem proteção."""
+    cascade = _load_face_cascade(NoModelNeeded())
+    assert cascade is not None
+
+
+def test_inpaint_components_only_repaints_inside_the_mask() -> None:
+    """O inpaint por componente só pode alterar os pixels da máscara; o resto do quadro
+    (rosto, cenário) fica intacto. Dois blocos separados são reconstruídos cada um no seu
+    recorte."""
+    cleaner = SubtitleFrameCleaner(NoModelNeeded())
+    # troca o motor LaMa por um substituto: devolve um bloco 512 de cor sólida, sem exigir
+    # o modelo ONNX instalado — o que se testa aqui é a COLAGEM por componente.
+    cleaner._run_lama_512 = lambda image_512, mask_512: np.full(image_512.shape, 200, np.uint8)
+    frame = np.full((120, 200, 3), 50, np.uint8)
+    mask = np.zeros((120, 200), np.uint8)
+    mask[15:35, 20:70] = 255     # bloco A (rodapé esquerdo)
+    mask[80:100, 140:190] = 255  # bloco B (canto oposto)
+    out = cleaner.inpaint_components(frame, mask)
+    assert np.array_equal(out[mask == 0], frame[mask == 0]), "mexeu fora da máscara"
+    assert not np.array_equal(out[mask > 0], frame[mask > 0]), "não reconstruiu dentro da máscara"
+    assert int(out[25, 45, 0]) == 200 and int(out[90, 165, 0]) == 200
+
+
+def test_auto_mode_requires_the_ai_pack() -> None:
+    """Sem o pacote de IA, o modo automático falha CEDO e com mensagem clara — não no meio
+    do vídeo depois de horas."""
+    probe = {
+        "width": 320, "height": 180, "fps": 30.0, "duration": 4.0, "videoDuration": 4.0,
+        "hdr": False, "frameCount": 120, "frameRateRational": "30/1",
+    }
+    with pytest.raises(SubtitleRemovalError):
+        remove_burned_subtitles_auto(Path("nao-existe.mp4"), Path("saida.mp4"), probe, NoModelNeeded())

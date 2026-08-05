@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections import deque
 from pathlib import Path
 from typing import IO, Callable
 
@@ -432,21 +433,82 @@ class SubtitleFrameCleaner:
         candidate[y1:y2, x1:x2] = result
         return candidate
 
+    # ------------------------------------------------------------------
+    # Modo AUTOMÁTICO "tela toda menos rosto" (receita da Colab, v2.4.1).
+    # Reaproveita o MESMO motor ONNX e o MESMO detector DBNet do modo de caixa; a
+    # diferença é a estratégia: em vez de apagar só dentro de uma caixa desenhada,
+    # varre a TELA TODA por texto de qualquer cor e protege o rosto.
+    # ------------------------------------------------------------------
+    def _auto_boxes(self, frame, min_text_h: int, min_area: int):
+        """Caixas de texto de QUALQUER cor na TELA TODA (detector DBNet), já filtradas
+        como na v2.4.1: descarta caixa baixa demais (< min_text_h → o texto pequeno da
+        Bíblia na tela, que NÃO é legenda) e área minúscula (< min_area → ruído do
+        detector). Devolve None quando o detector não está instalado — quem chama trata
+        isso como erro, pois sem OCR não há como achar a legenda."""
+        import cv2
+        import numpy as np
+        boxes = self._detect_boxes(frame)
+        if boxes is None:
+            return None
+        kept = []
+        for quad in boxes:
+            box = np.asarray(quad, dtype=np.float32)
+            if box.shape != (4, 2):
+                continue
+            if cv2.contourArea(box) < min_area:
+                continue
+            if (box[:, 1].max() - box[:, 1].min()) < min_text_h:
+                continue
+            kept.append(box)
+        return kept
 
-def remove_burned_subtitles(
+    def inpaint_components(self, frame, mask):
+        """Inpaint POR COMPONENTE de texto: cada bloco no seu recorte LOCAL (contexto pela
+        ALTURA), 512, colando só os pixels da máscara. Assim texto no topo E no rodapé não
+        vira "a tela inteira esticada" e borrada — cada bloco fica nítido. É o mesmo motor
+        (`_run_lama_512`) do modo de caixa, varrendo cada componente da máscara. Lê o
+        contexto do quadro ORIGINAL e escreve numa cópia, igual à receita validada."""
+        import cv2
+        import numpy as np
+        height, width = frame.shape[:2]
+        binary = (mask > 0).astype(np.uint8)
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
+        out = frame.copy()
+        for index in range(1, count):
+            x, y = int(stats[index, cv2.CC_STAT_LEFT]), int(stats[index, cv2.CC_STAT_TOP])
+            w, h = int(stats[index, cv2.CC_STAT_WIDTH]), int(stats[index, cv2.CC_STAT_HEIGHT])
+            context = max(40, int(h * 0.6))
+            x1, y1 = max(0, x - context), max(0, y - context)
+            x2, y2 = min(width, x + w + context), min(height, y + h + context)
+            crop = frame[y1:y2, x1:x2]
+            component = np.zeros((height, width), np.uint8)
+            component[labels == index] = 255
+            crop_mask = component[y1:y2, x1:x2]
+            if crop.size == 0 or not crop_mask.any():
+                continue
+            image_512 = cv2.resize(crop, (512, 512), interpolation=cv2.INTER_AREA)
+            mask_512 = cv2.resize(crop_mask, (512, 512), interpolation=cv2.INTER_NEAREST)
+            result = self._run_lama_512(image_512, mask_512)
+            result = cv2.resize(result, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_CUBIC)
+            selection = crop_mask > 0
+            region = out[y1:y2, x1:x2]
+            region[selection] = result[selection]
+            out[y1:y2, x1:x2] = region
+        return out
+
+
+def _stream_frames(
     source: Path,
     destination: Path,
     probe: dict[str, object],
-    regions: list[dict[str, object]],
-    models: SubtitleModelManager,
+    process_frame: Callable[[object, int, int], object],
     progress: Callable[[float, str], None] | None = None,
+    message: str = "Reconstruindo quadro",
 ) -> dict[str, float]:
-    if bool(probe.get("hdr")):
-        raise SubtitleRemovalError("Vídeos HDR ainda não são suportados na remoção de legenda gravada, pois a conversão poderia alterar as cores.")
-    if not regions:
-        raise SubtitleRemovalError("Nenhuma região ativa foi definida para remover da imagem.")
-    if int(probe["width"]) % 2 or int(probe["height"]) % 2:
-        raise SubtitleRemovalError("A resolução precisa ter largura e altura pares para manter H.264 em yuv420p.")
+    """Decodifica o vídeo com FFmpeg, entrega cada quadro BGR a ``process_frame(frame,
+    índice, tempo_ms)`` e recodifica em H.264 o quadro devolvido. Concentra a leitura/escrita
+    robusta (contagem exata de quadros, stderr em arquivo, limpeza em caso de falha) que os
+    dois modos — caixa e automático — compartilham."""
     import numpy as np
     fps = float(probe["fps"])
     rate = str(probe.get("frameRateRational") or f"{fps:.8f}")
@@ -473,9 +535,6 @@ def remove_burned_subtitles(
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     logs = Path(tempfile.mkdtemp(prefix="ofuscador-ffmpeg-"))
     decode_log, encode_log = logs / "decode.txt", logs / "encode.txt"
-    cleaner = SubtitleFrameCleaner(models, fps)
-    previous_input = None
-    previous_clean = None
     processed = 0
     decoder = encoder = None
     try:
@@ -491,17 +550,14 @@ def remove_burned_subtitles(
                     break
                 frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
                 time_ms = int(round(processed / fps * 1000))
-                active = regions_at(regions, time_ms)
-                cleaned = cleaner.clean(frame, active, previous_input, previous_clean) if active else frame
+                cleaned = process_frame(frame, processed, time_ms)
                 try:
                     encoder.stdin.write(cleaned.tobytes())
                 except (BrokenPipeError, OSError) as exc:
                     raise SubtitleRemovalError(f"O codificador H.264 parou no quadro {processed}. {_tail(encode_log)}".strip()) from exc
-                previous_input = frame
-                previous_clean = cleaned
                 processed += 1
                 if progress and (processed % max(1, int(fps // 2)) == 0 or processed == total_frames):
-                    progress(min(1.0, processed / max(1, total_frames)), f"Reconstruindo quadro {processed} de {total_frames}")
+                    progress(min(1.0, processed / max(1, total_frames)), f"{message} {processed} de {total_frames}")
             decoder.stdout.close()
             try:
                 decode_status = decoder.wait(timeout=120)
@@ -528,11 +584,11 @@ def remove_burned_subtitles(
                 f"({missing / fps:.2f}s a menos). {_tail(decode_log)}".strip()
             )
     except Exception:
-        for process in (decoder, encoder):
-            if process and process.poll() is None:
-                process.kill()
+        for child in (decoder, encoder):
+            if child and child.poll() is None:
+                child.kill()
                 try:
-                    process.wait(timeout=10)
+                    child.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     pass
         destination.unlink(missing_ok=True)
@@ -550,3 +606,237 @@ def remove_burned_subtitles(
         "outputDuration": processed / fps,
         "sourceVideoDuration": video_duration,
     }
+
+
+def remove_burned_subtitles(
+    source: Path,
+    destination: Path,
+    probe: dict[str, object],
+    regions: list[dict[str, object]],
+    models: SubtitleModelManager,
+    progress: Callable[[float, str], None] | None = None,
+) -> dict[str, float]:
+    """Modo CAIXA: reconstrói o fundo apenas DENTRO das regiões que o usuário revisou."""
+    if bool(probe.get("hdr")):
+        raise SubtitleRemovalError("Vídeos HDR ainda não são suportados na remoção de legenda gravada, pois a conversão poderia alterar as cores.")
+    if not regions:
+        raise SubtitleRemovalError("Nenhuma região ativa foi definida para remover da imagem.")
+    if int(probe["width"]) % 2 or int(probe["height"]) % 2:
+        raise SubtitleRemovalError("A resolução precisa ter largura e altura pares para manter H.264 em yuv420p.")
+    fps = float(probe["fps"])
+    cleaner = SubtitleFrameCleaner(models, fps)
+    previous_input = None
+    previous_clean = None
+
+    def process(frame, index: int, time_ms: int):
+        nonlocal previous_input, previous_clean
+        active = regions_at(regions, time_ms)
+        cleaned = cleaner.clean(frame, active, previous_input, previous_clean) if active else frame
+        previous_input = frame
+        previous_clean = cleaned
+        return cleaned
+
+    return _stream_frames(source, destination, probe, process, progress)
+
+
+def _load_face_cascade(models: SubtitleModelManager):
+    """CascadeClassifier de rosto do OpenCV, procurando o XML na pasta de modelos do app e
+    nos dados empacotados do OpenCV. Devolve None se não achar — aí o chamador protege a
+    FAIXA DO MEIO da tela por segurança, como faz a receita da Colab sem detector."""
+    import cv2
+    name = "haarcascade_frontalface_default.xml"
+    candidates: list[Path] = []
+    try:
+        model_dir = models.models_dir()
+    except Exception:
+        model_dir = None
+    if model_dir:
+        candidates.append(Path(model_dir) / name)
+    try:
+        candidates.append(Path(cv2.data.haarcascades) / name)
+    except Exception:
+        pass
+    for path in candidates:
+        try:
+            if path.is_file():
+                cascade = cv2.CascadeClassifier(str(path))
+                if not cascade.empty():
+                    return cascade
+        except Exception:
+            continue
+    return None
+
+
+def _face_rects(cascade, frame):
+    if cascade is None:
+        return []
+    import cv2
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cascade.detectMultiScale(gray, 1.2, 5, minSize=(90, 90))
+
+
+def _stamp_face(target, rects, height: int, width: int, only_upper: bool = False) -> None:
+    """Soma 1 na caixa AMPLIADA de cada rosto. ``only_upper`` ignora rostos na metade de
+    baixo (na PASSA 1 evita confundir legenda embaixo com rosto)."""
+    for (x, y, w, h) in rects:
+        if only_upper and (y + 0.5 * h) > 0.50 * height:
+            continue
+        y0 = max(0, int(y) - int(0.20 * h))
+        y1 = min(height, int(y) + int(1.00 * h))
+        x0 = max(0, int(x) - int(0.20 * w))
+        x1 = min(width, int(x) + int(1.20 * w))
+        target[y0:y1, x0:x1] += 1
+
+
+def _auto_params(options: dict[str, object] | None = None) -> dict[str, object]:
+    """Parâmetros da receita automática, com os valores da v2.4.1 validada e overrides por
+    variável de ambiente — dá para trocar velocidade por fidelidade sem recompilar."""
+    options = options or {}
+
+    def pick(key: str, env: str, default, cast):
+        if options.get(key) is not None:
+            try:
+                return cast(options[key])
+            except (TypeError, ValueError):
+                pass
+        raw = os.environ.get(env)
+        if raw not in (None, ""):
+            try:
+                return cast(raw)
+            except (TypeError, ValueError):
+                pass
+        return default
+
+    return {
+        "ocr_cada": max(1, pick("ocrEvery", "OFUSCADOR_OCR_CADA", 1, int)),
+        "min_text_h": max(1, pick("minTextH", "OFUSCADOR_MIN_TEXT_H", 22, int)),
+        "dil": max(0, pick("dil", "OFUSCADOR_DIL", 6, int)),
+        "temporal_w": max(1, pick("temporalW", "OFUSCADOR_TEMPORAL_W", 3, int)),
+        "min_area": max(1, pick("minArea", "OFUSCADOR_MIN_AREA", 60, int)),
+        "n_samp": max(8, pick("faceSamples", "OFUSCADOR_FACE_SAMPLES", 200, int)),
+        "face_freq": min(1.0, max(0.0, pick("faceFreq", "OFUSCADOR_FACE_FREQ", 0.30, float))),
+    }
+
+
+def _scan_faces(source: Path, probe: dict[str, object], cascade, n_samp: int, facehits, height: int, width: int) -> int:
+    """PASSA 1: decodifica o vídeo em fps BAIXO (~n_samp amostras no total) e marca onde o
+    rosto aparece. Usa o MESMO FFmpeg do app (não o VideoCapture do OpenCV), então funciona
+    igual no pacote congelado. Devolve quantas amostras conseguiu ler."""
+    import numpy as np
+    fps = float(probe["fps"])
+    frame_bytes = width * height * 3
+    video_duration = float(probe.get("videoDuration") or probe["duration"]) or 1.0
+    sample_fps = max(0.2, min(fps if fps > 0 else 2.0, n_samp / max(1.0, video_duration)))
+    command = [
+        find_binary("ffmpeg"), "-hide_banner", "-nostdin", "-v", "error", "-i", str(source),
+        "-map", "0:v:0", "-an", "-sn", "-dn", "-vf", f"fps={sample_fps:.6f}",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
+    ]
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    samples = 0
+    process = None
+    try:
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=flags)
+        assert process.stdout is not None
+        while True:
+            raw = _read_exact(process.stdout, frame_bytes)
+            if raw is None:
+                break
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+            _stamp_face(facehits, _face_rects(cascade, frame), height, width, only_upper=True)
+            samples += 1
+        process.stdout.close()
+        process.wait(timeout=120)
+    except Exception:
+        # A PASSA 1 é só uma otimização de segurança; se falhar, devolve o que leu e o
+        # chamador protege a faixa do meio.
+        if process and process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+    return samples
+
+
+def remove_burned_subtitles_auto(
+    source: Path,
+    destination: Path,
+    probe: dict[str, object],
+    models: SubtitleModelManager,
+    progress: Callable[[float, str], None] | None = None,
+    options: dict[str, object] | None = None,
+) -> dict[str, float]:
+    """Modo AUTOMÁTICO "tela toda menos rosto" — a receita v2.4.1 validada na Colab,
+    rodando no PC com o motor ONNX do app. Sem desenhar caixa: apaga texto de QUALQUER cor
+    na tela inteira e protege o rosto. Duas passadas: 1) mapeia onde o rosto costuma ficar;
+    2) OCR quadro a quadro + união temporal + trava de tamanho (protege a Bíblia) + trava de
+    rosto (buraco fixo + rosto por quadro) + inpaint por componente."""
+    import cv2
+    import numpy as np
+    if bool(probe.get("hdr")):
+        raise SubtitleRemovalError("Vídeos HDR ainda não são suportados na remoção de legenda gravada, pois a conversão poderia alterar as cores.")
+    if int(probe["width"]) % 2 or int(probe["height"]) % 2:
+        raise SubtitleRemovalError("A resolução precisa ter largura e altura pares para manter H.264 em yuv420p.")
+    params = _auto_params(options)
+    fps = float(probe["fps"])
+    width, height = int(probe["width"]), int(probe["height"])
+
+    cleaner = SubtitleFrameCleaner(models, fps)
+    # Aquece o motor e o detector agora: falha cedo e com mensagem clara, não depois de
+    # horas no meio do vídeo.
+    cleaner._session_for_lama()
+    if cleaner._text_detector() is None:
+        raise SubtitleRemovalError("O detector de texto (RapidOCR) não está disponível. Reinstale o pacote de IA para usar o modo automático.")
+
+    if progress:
+        progress(0.0, "Mapeando onde fica o rosto")
+    cascade = _load_face_cascade(models)
+    has_face = cascade is not None
+    facehits = np.zeros((height, width), np.float32)
+    samples = _scan_faces(source, probe, cascade, int(params["n_samp"]), facehits, height, width) if has_face else 0
+    if not has_face or samples <= 0:
+        # Sem detector de rosto (ou sem conseguir amostrar): protege a FAIXA DO MEIO por
+        # segurança, exatamente como a receita da Colab quando não há detector.
+        facehits[int(0.12 * height):int(0.60 * height), :] = 1.0
+        samples = 1
+    facefreq = facehits / max(1, samples)
+    face_zone = cv2.dilate(
+        (facefreq >= float(params["face_freq"])).astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)),
+    ) > 0
+    allowed = np.ones((height, width), bool)
+    allowed[face_zone] = False
+
+    dil = int(params["dil"])
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil * 2 + 1, dil * 2 + 1)) if dil > 0 else None
+    ocr_cada = int(params["ocr_cada"])
+    min_text_h = int(params["min_text_h"])
+    min_area = int(params["min_area"])
+    history: deque = deque(maxlen=int(params["temporal_w"]))
+
+    def process(frame, index: int, time_ms: int):
+        if index % ocr_cada == 0:
+            found = cleaner._auto_boxes(frame, min_text_h, min_area)
+            if found is None:
+                raise SubtitleRemovalError("O detector de texto (RapidOCR) parou de responder durante o processamento.")
+            history.append(found)
+        mask = np.zeros((height, width), np.uint8)
+        for found in history:
+            for box in found:
+                cv2.fillPoly(mask, [box.astype(np.int32)], 255)
+        if not mask.any():
+            return frame
+        if kernel is not None:
+            mask = cv2.dilate(mask, kernel)
+        mask[~allowed] = 0                       # trava 1: buraco FIXO do rosto (PASSA 1)
+        if has_face and mask.any():              # trava 2: rosto DESTE quadro
+            dynamic = np.zeros((height, width), np.uint8)
+            _stamp_face(dynamic, _face_rects(cascade, frame), height, width)
+            mask[dynamic > 0] = 0
+        if not mask.any():
+            return frame
+        return cleaner.inpaint_components(frame, mask)
+
+    forward = (lambda fraction, message: progress(0.06 + fraction * 0.94, message)) if progress else None
+    return _stream_frames(source, destination, probe, process, forward, message="Reconstruindo (tela toda) quadro")

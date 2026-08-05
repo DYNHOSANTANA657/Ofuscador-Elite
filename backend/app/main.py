@@ -77,6 +77,9 @@ class SubtitleScanRequest(BaseModel):
 class SubtitleRemovalRequest(BaseModel):
     removeEmbedded: bool = False
     removeBurnedIn: bool = False
+    # "regions" = apaga só dentro das caixas revisadas (exige scanId);
+    # "auto" = tela toda menos rosto (receita da Colab), sem exame nem caixa.
+    burnedInMode: str = Field(default="regions", pattern="^(regions|auto)$")
     scanId: str | None = Field(default=None, min_length=32, max_length=32)
 
 
@@ -106,7 +109,7 @@ class JobRequest(BaseModel):
             removal = self.subtitleRemoval
             if not removal.removeEmbedded and not removal.removeBurnedIn:
                 raise ValueError("Ative pelo menos um tipo de remoção de legenda.")
-            if removal.removeBurnedIn and not removal.scanId:
+            if removal.removeBurnedIn and removal.burnedInMode != "auto" and not removal.scanId:
                 raise ValueError("Examine e revise a legenda gravada antes de processar.")
         return self
 
@@ -345,6 +348,7 @@ def create_job(payload: JobRequest) -> dict[str, object]:
             remove_embedded=payload.subtitleRemoval.removeEmbedded,
             remove_burned_in=payload.subtitleRemoval.removeBurnedIn,
             scan_id=payload.subtitleRemoval.scanId,
+            burned_in_mode=payload.subtitleRemoval.burnedInMode,
             audio_asset_id=payload.audioAssetId,
         )
     except ValueError as exc:
