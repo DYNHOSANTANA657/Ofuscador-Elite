@@ -93,8 +93,13 @@ W = int(cap.get(3)); H = int(cap.get(4))
 N = total if MAX_SEGUNDOS == 0 else min(total, int(MAX_SEGUNDOS * fps))
 print(f'{total} quadros no total; processando {N}; {W}x{H} @ {fps:.1f}', flush=True)
 
-# ---------------- 5) PASSA 1: ZONA de legenda em QUALQUER posicao (mapa 2D de frequencia) --------
+# ---------------- 5) PASSA 1: ZONA de legenda (TELA TODA) + PROTECAO do ROSTO ----------
+# texto GRANDE frequente em QUALQUER posicao = zona de legenda. E acha o ROSTO (Haar)
+# p/ NUNCA apagar olhos/oculos (senao o detector confunde a armacao dos oculos c/ "texto").
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+HAS_FACE = not face_cascade.empty()
 heat = np.zeros((H, W), np.float32)
+facehits = np.zeros((H, W), np.float32)
 samp = np.unique(np.linspace(0, N - 1, min(N_SAMP, N)).astype(int))
 last = None
 for i in samp:
@@ -104,13 +109,25 @@ for i in samp:
     m = np.zeros((H, W), np.uint8)
     for b in boxes(fr): cv2.fillPoly(m, [b.astype(np.int32)], 255)
     heat += (m > 0)
-heat /= len(samp)
-zb = heat >= PERSIST                                    # onde texto GRANDE aparece com frequencia
+    if HAS_FACE:
+        gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+        for (x, y, w, h) in face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(70, 70)):
+            y0 = max(0, y - int(0.15 * h)); y1 = min(H, y + int(1.05 * h))   # so ate o queixo
+            x0 = max(0, x - int(0.20 * w)); x1 = min(W, x + int(1.20 * w))
+            facehits[y0:y1, x0:x1] += 1
+heat /= len(samp); facefreq = facehits / len(samp)
+if not HAS_FACE:
+    print('AVISO: sem detector de rosto -> protegendo o MEIO por seguranca', flush=True)
+    facefreq[int(0.18 * H):int(0.58 * H), :] = 1.0
+zb = heat >= PERSIST                                    # texto GRANDE frequente = zona de legenda
 zb = cv2.dilate(zb.astype(np.uint8),
                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MARGEM * 2 + 1, MARGEM * 2 + 1))) > 0
+face_zone = cv2.dilate((facefreq >= 0.10).astype(np.uint8),
+                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))) > 0
+zb[face_zone] = False                                   # NUNCA apaga o rosto (olhos/oculos)
 if not zb.any():
     raise SystemExit('Nenhuma zona de legenda encontrada (baixe PERSIST ou MIN_TEXT_H).')
-print(f'ZONA de legenda: {int(zb.sum())} px ({100.0 * zb.sum() / (H * W):.1f}% da tela)', flush=True)
+print(f'ZONA: {int(zb.sum())} px ({100.0 * zb.sum() / (H * W):.1f}%) | rosto protegido: {int(face_zone.sum())} px', flush=True)
 ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (DIL * 2 + 1, DIL * 2 + 1))
 
 if last is not None:
