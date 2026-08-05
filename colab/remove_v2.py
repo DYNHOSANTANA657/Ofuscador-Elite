@@ -21,6 +21,13 @@ MODEL_URL    = 'https://github.com/enesmsahin/simple-lama-inpainting/releases/do
 
 # ---------------- 1) video ----------------
 cands = [x for x in glob.glob('*.mp4') if 'sem_legenda' not in x]
+if not cands:                                            # VM nova/reciclada: pede o upload
+    print('>>> Nenhum .mp4 no /content. Clique em "Escolher arquivos" e envie o video <<<', flush=True)
+    try:
+        from google.colab import files; files.upload()
+    except Exception as e:
+        print('upload falhou:', e, flush=True)
+    cands = [x for x in glob.glob('*.mp4') if 'sem_legenda' not in x]
 assert cands, 'ERRO: nao achei o .mp4 original (reenvie o video).'
 VID = cands[0]; print('video original:', VID)
 
@@ -48,7 +55,12 @@ def inpaint(bgr, mask):
     return cv2.cvtColor(np.clip(res, 0, 255).astype('uint8')[:h, :w], cv2.COLOR_RGB2BGR)
 
 # ---------------- 3) detector de texto ----------------
-from rapidocr_onnxruntime import RapidOCR
+try:
+    from rapidocr_onnxruntime import RapidOCR
+except ImportError:
+    print('instalando rapidocr_onnxruntime (VM nova)...', flush=True)
+    os.system('pip install -q rapidocr_onnxruntime')
+    from rapidocr_onnxruntime import RapidOCR
 ocr = RapidOCR()
 def boxes(img):
     out = ocr(img, use_det=True, use_rec=False, use_cls=False)
