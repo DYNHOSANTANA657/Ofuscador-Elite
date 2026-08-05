@@ -18,7 +18,7 @@ from google.colab.patches import cv2_imshow
 # ---------------- parametros ----------------
 MAX_SEGUNDOS = 0        # 0 = video INTEIRO
 OCR_CADA     = 2        # OCR a cada N quadros (a uniao temporal cobre os pulados)
-PERSIST      = 0.05     # fracao dos quadros amostrados p/ um ponto virar "zona de legenda"
+PERSIST      = 0.03     # fracao dos quadros amostrados p/ um ponto virar "zona de legenda" (baixo = pega legenda curta, ex. rodape em tela dividida)
 MIN_TEXT_H   = 22       # ALTURA minima da caixa de texto, em px. PROTEGE a Biblia (letra pequena)
 DIL          = 6        # dilatacao da mascara (engorda o texto p/ nao sobrar borda)
 TEMPORAL_W   = 5        # quantas deteccoes recentes de OCR unir (mata o pisca do karaoke)
