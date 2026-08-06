@@ -440,11 +440,13 @@ class SubtitleFrameCleaner:
     # varre a TELA TODA por texto de qualquer cor e protege o rosto.
     # ------------------------------------------------------------------
     def _auto_boxes(self, frame, min_text_h: int, min_area: int):
-        """Caixas de texto de QUALQUER cor na TELA TODA (detector DBNet), já filtradas
-        como na v2.4.1: descarta caixa baixa demais (< min_text_h → o texto pequeno da
-        Bíblia na tela, que NÃO é legenda) e área minúscula (< min_area → ruído do
-        detector). Devolve None quando o detector não está instalado — quem chama trata
-        isso como erro, pois sem OCR não há como achar a legenda."""
+        """Caixas de texto de QUALQUER cor na TELA TODA (detector DBNet). v2.7: NÃO há mais
+        trava de altura (MIN_TEXT_H removida a pedido do usuário) — a legenda é apagada por
+        menor que seja (inclusive em vídeo de baixa resolução, ex. 360x516, onde a legenda
+        tem ~15-20px). Filtra só área minúscula (< min_area → ruído do detector, que nunca
+        pega legenda). Devolve None quando o detector não está instalado — quem chama trata
+        isso como erro, pois sem OCR não há como achar a legenda.
+        (min_text_h é aceito por compatibilidade de assinatura, mas não é mais usado.)"""
         import cv2
         import numpy as np
         boxes = self._detect_boxes(frame)
@@ -457,8 +459,9 @@ class SubtitleFrameCleaner:
                 continue
             if cv2.contourArea(box) < min_area:
                 continue
-            if (box[:, 1].max() - box[:, 1].min()) < min_text_h:
-                continue
+            # v2.7: SEM trava de altura (MIN_TEXT_H removida a pedido do usuário) — apaga a
+            # legenda por MENOR que seja. Vídeo de baixa resolução (ex. 360x516) tinha legenda
+            # de ~15-20px que escapava da trava de 22px. Sobra só o filtro de área acima (ruído).
             kept.append(box)
         return kept
 
