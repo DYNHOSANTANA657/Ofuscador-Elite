@@ -82,6 +82,7 @@ export function EliteApp() {
   const [mode, setMode] = useState<ProcessMode>("audio");
   const [removeEmbedded, setRemoveEmbedded] = useState(true);
   const [removeBurnedIn, setRemoveBurnedIn] = useState(false);
+  const [burnedInMode, setBurnedInMode] = useState<"auto" | "regions">("auto");
   const [scanFullScreen, setScanFullScreen] = useState(false);
   const [modelStatus, setModelStatus] = useState<ModelStatus>({ installed: false, status: "not_installed", progress: 0, message: "Pacote de IA ainda não instalado" });
   const [scan, setScan] = useState<SubtitleScan | null>(null);
@@ -257,7 +258,7 @@ export function EliteApp() {
   const selectedVoice = useMemo(() => voices.find((item) => item.shortName === voice), [voices, voice]);
   const usesAudio = mode !== "subtitles";
   const usesSubtitles = mode !== "audio";
-  const subtitleReady = !usesSubtitles || ((removeEmbedded && Boolean(upload?.subtitleTracks.length)) || (removeBurnedIn && scan?.status === "completed" && regions.some((item) => item.enabled)));
+  const subtitleReady = !usesSubtitles || ((removeEmbedded && Boolean(upload?.subtitleTracks.length)) || (removeBurnedIn && (burnedInMode === "auto" ? modelStatus.installed && !upload?.hdr : scan?.status === "completed" && regions.some((item) => item.enabled))));
   const usesOwnAudio = provider === "file";
   const voiceReady = usesOwnAudio ? Boolean(audioAsset) : Boolean(textValue.trim() && textValue.length <= 5000 && voice);
   const audioReady = !usesAudio || Boolean(voiceReady && audioTrack !== null);
@@ -494,7 +495,7 @@ export function EliteApp() {
     if (!canProcess || !upload) return;
     setNotice("");
     try {
-      if (removeBurnedIn && scan?.status === "completed") {
+      if (removeBurnedIn && burnedInMode === "regions" && scan?.status === "completed") {
         await saveRegions();
       }
       const next = await apiJson<Job>("/api/jobs", { method: "POST", body: JSON.stringify({
@@ -502,7 +503,7 @@ export function EliteApp() {
         text: usesAudio && !usesOwnAudio ? textValue : "", voice: usesAudio && !usesOwnAudio ? voice : "", gender,
         provider, audioAssetId: usesAudio && usesOwnAudio ? audioAsset?.audioId : null,
         volumePercent: volume, audioStreamIndex: usesAudio ? audioTrack : null,
-        subtitleRemoval: { removeEmbedded: usesSubtitles && removeEmbedded, removeBurnedIn: usesSubtitles && removeBurnedIn, scanId: removeBurnedIn ? scan?.id : null },
+        subtitleRemoval: { removeEmbedded: usesSubtitles && removeEmbedded, removeBurnedIn: usesSubtitles && removeBurnedIn, burnedInMode, scanId: removeBurnedIn && burnedInMode === "regions" ? scan?.id : null },
       }) });
       setJob(next);
     } catch (error) {
@@ -717,7 +718,7 @@ export function EliteApp() {
           <div className="step-heading"><span>03</span><div><h2>Remoção de legendas</h2><p>Faixas separadas sem perda ou texto gravado com IA local</p></div></div>
           <div className="subtitle-options">
             <label className={upload.subtitleTracks.length ? "option-box" : "option-box disabled"}><input type="checkbox" checked={removeEmbedded} disabled={!upload.subtitleTracks.length} onChange={(event) => setRemoveEmbedded(event.target.checked)}/><span><b>Remover faixas separadas</b><small>{upload.subtitleTracks.length ? `${upload.subtitleTracks.length} faixa(s) detectada(s): ${upload.subtitleTracks.map((track) => `${track.codec.toUpperCase()}${track.language !== "und" ? ` · ${track.language}` : ""}`).join(", ")}. Vídeo e áudio serão copiados sem recodificação quando esta for a única remoção.` : "Nenhuma faixa separada foi encontrada."}</small></span></label>
-            <label className="option-box"><input type="checkbox" checked={removeBurnedIn} onChange={(event) => { setRemoveBurnedIn(event.target.checked); setPreviewStamp(0); }}/><span><b>Apagar legenda gravada na imagem</b><small>Usa OCR, recuperação de quadros próximos e LaMa. O vídeo será recodificado em H.264 CRF 16.</small></span></label>
+            <label className="option-box"><input type="checkbox" checked={removeBurnedIn} onChange={(event) => { setRemoveBurnedIn(event.target.checked); setPreviewStamp(0); }}/><span><b>Apagar legenda gravada na imagem</b><small>Reconstrói o fundo com IA local (OCR + LaMa). O vídeo é recodificado em H.264.</small></span></label>
           </div>
 
           {removeBurnedIn && <div className="ai-removal-panel">
@@ -725,6 +726,14 @@ export function EliteApp() {
               <div><b>Pacote gratuito de IA necessário</b><small>{modelStatus.error || modelStatus.message}. Ele roda somente neste computador e é instalado uma vez.</small></div>
               {!["downloading", "installing"].includes(modelStatus.status) ? <div className="model-actions"><button onClick={() => void installSubtitleModels()}>Baixar e instalar</button><button className="secondary" onClick={() => modelFileInput.current?.click()}>Importar ZIP</button><input ref={modelFileInput} type="file" hidden accept="application/zip,.zip" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importSubtitleModels(file); }}/></div> : <div className="model-progress"><span>{modelStatus.message}</span><b>{Math.round(modelStatus.progress)}%</b><progress value={modelStatus.progress} max="100"/></div>}
             </div> : <>
+              <div className="provider-toggle burned-mode-toggle">
+                <button type="button" className={burnedInMode === "auto" ? "active" : ""} onClick={() => { setBurnedInMode("auto"); setPreviewStamp(0); }}><b>Automático (recomendado)</b><small>Apaga o texto na tela inteira e protege o rosto — você não desenha nada.</small></button>
+                <button type="button" className={burnedInMode === "regions" ? "active" : ""} onClick={() => setBurnedInMode("regions")}><b>Desenhar caixa (avançado)</b><small>Você marca as áreas e revê antes de processar.</small></button>
+              </div>
+              {burnedInMode === "auto" ? <div className="auto-removal-note">
+                <p className="provider-note"><b>Modo automático ligado.</b> É a mesma receita testada no Colab: encontra a legenda de qualquer cor pela forma das letras, apaga no rodapé e no topo e <b>protege o rosto</b>. É só clicar em <b>Processar</b> mais abaixo — sem examinar nem desenhar.</p>
+                <p className="provider-note azure-note">Sem uma placa de vídeo forte, o modo automático é <b>lento</b> (analisa quadro a quadro): num vídeo longo pode demorar bastante. O resultado é o mesmo do Colab, só mais devagar.</p>
+              </div> : <>
               <div className="scan-toolbar"><label><input type="checkbox" checked={scanFullScreen} onChange={(event) => setScanFullScreen(event.target.checked)}/> Examinar a tela inteira <small>(o padrão examina a parte inferior)</small></label><button disabled={scan?.status === "queued" || scan?.status === "scanning"} onClick={() => void startSubtitleScan()}>{scan?.status === "completed" ? "Examinar novamente" : "Examinar legendas"}</button></div>
               {scan && ["queued", "scanning"].includes(scan.status) && <div className="model-progress"><span>{scan.message}</span><b>{Math.round(scan.progress)}%</b><progress value={scan.progress} max="100"/></div>}
               {scan?.status === "completed" && <div className="review-layout">
@@ -740,6 +749,7 @@ export function EliteApp() {
                 <div className="region-list"><div className="region-list-heading"><b>{regions.length} região(ões)</b><button onClick={() => setRegions((current) => [...current, { id: crypto.randomUUID().replace(/-/g, ""), x: .15, y: .75, width: .7, height: .15, startMs: 0, endMs: Math.round(upload.duration * 1000), source: "manual", enabled: true, text: "Área manual", confidence: 1 }])}>+ Adicionar área</button></div>{regions.length === 0 ? <p>Nenhum texto foi detectado. Você pode desenhar uma área manualmente.</p> : regions.map((item, index) => <div className={`region-item ${item.enabled ? "" : "off"}`} key={item.id}><label><input type="checkbox" checked={item.enabled} onChange={(event) => updateRegion(item.id, { enabled: event.target.checked })}/><b>Área {index + 1}</b><small>{item.source === "manual" ? "Manual" : `${Math.round(item.confidence * 100)}% OCR`}</small></label><p>{item.text || "Texto detectado"}</p><div className="region-times"><label>Início (s)<input type="number" min="0" max={upload.duration} step="0.1" value={(item.startMs / 1000).toFixed(1)} onChange={(event) => updateRegion(item.id, { startMs: Math.max(0, Math.round(Number(event.target.value) * 1000)) })}/></label><label>Fim (s)<input type="number" min="0" max={upload.duration} step="0.1" value={(item.endMs / 1000).toFixed(1)} onChange={(event) => updateRegion(item.id, { endMs: Math.min(Math.round(upload.duration * 1000), Math.round(Number(event.target.value) * 1000)) })}/></label></div><button className="remove-region" onClick={() => setRegions((current) => current.filter((region) => region.id !== item.id))}>Excluir área</button></div>)}</div>
                 <div className="preview-removal"><button disabled={subtitleBusy || !regions.some((item) => item.enabled && item.startMs <= reviewTimeMs && item.endMs >= reviewTimeMs)} onClick={() => void makeSubtitlePreview()}>{subtitleBusy ? "Reconstruindo…" : "Gerar prévia antes e depois"}</button>{previewStamp > 0 && subtitlePreviewUrl && <div><figure><img src={`/api/uploads/${upload.uploadId}/frame?timeMs=${reviewTimeMs}`} alt="Antes da remoção"/><figcaption>Antes</figcaption></figure><figure><img src={subtitlePreviewUrl} alt="Depois da remoção"/><figcaption>Depois — estimativa da IA</figcaption></figure></div>}</div>
               </div>}
+              </>}
             </>}
             <div className="inline-warning"><b>Limite da reconstrução:</b> a IA estima o fundo que estava escondido. Ela não recupera exatamente pixels que não existem nos quadros originais e nunca troca uma falha por borrão ou corte.</div>
           </div>}

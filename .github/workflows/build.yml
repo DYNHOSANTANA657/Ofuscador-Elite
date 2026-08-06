@@ -31,13 +31,23 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Instalar FFmpeg com libx264
+      - name: Instalar FFmpeg estático com libx264
         shell: pwsh
         run: |
-          choco install ffmpeg-full -y --no-progress
-          $ffmpeg = (Get-Command ffmpeg).Source
+          # Build ESTÁTICO (gpl) do BtbN: ffmpeg.exe/ffprobe.exe sem DLLs externas, então o
+          # --add-binary do PyInstaller empacota um único exe que roda sozinho. O ffmpeg-full
+          # do choco é COMPARTILHADO e, empacotado sem as DLLs, não abria — o autoteste do
+          # pacote acusava h264=false e o build do Windows falhava.
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "ffmpeg.zip"
+          $dest = Join-Path $env:RUNNER_TEMP "ffmpeg-static"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $ffmpeg = (Get-ChildItem -Path $dest -Recurse -Filter ffmpeg.exe | Select-Object -First 1).FullName
+          $ffprobe = (Get-ChildItem -Path $dest -Recurse -Filter ffprobe.exe | Select-Object -First 1).FullName
+          if (-not $ffmpeg -or -not $ffprobe) { throw "O pacote do FFmpeg não trouxe ffmpeg.exe e ffprobe.exe." }
           if (-not (& $ffmpeg -hide_banner -encoders | Select-String -SimpleMatch "libx264")) {
-            throw "O FFmpeg instalado não contém libx264."
+            throw "O FFmpeg baixado não contém libx264."
           }
           "FFMPEG_DIR=$(Split-Path -Parent $ffmpeg)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 

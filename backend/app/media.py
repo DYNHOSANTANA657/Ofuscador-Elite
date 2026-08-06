@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 from fractions import Fraction
@@ -273,8 +274,9 @@ def mux_clean_video_with_voice_command(
 
 
 def has_h264_encoder() -> bool:
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
-        result = subprocess.run([find_binary("ffmpeg"), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30, check=False)
+        result = subprocess.run([find_binary("ffmpeg"), "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30, check=False, creationflags=flags)
     except (OSError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0 and "libx264" in result.stdout

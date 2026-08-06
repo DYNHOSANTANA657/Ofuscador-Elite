@@ -195,6 +195,22 @@ def self_test() -> int:
         report["providers"] = available
     except Exception as exc:
         report["providers_error"] = f"{type(exc).__name__}: {exc}"
+    # Diagnóstico do H.264: se ele falhar no pacote mas passar no PC de build, quase sempre
+    # é o ffmpeg empacotado (build compartilhado sem as DLLs, ou sem libx264). Guarda o
+    # motivo — caminho, código de saída e stderr — para o build da CI mostrar.
+    if not checks["h264"]:
+        try:
+            ffmpeg_path = find_binary("ffmpeg")
+            h264_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            proc = subprocess.run([ffmpeg_path, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=30, check=False, creationflags=h264_flags)
+            report["h264_debug"] = {
+                "ffmpeg": ffmpeg_path,
+                "returncode": proc.returncode,
+                "has_libx264": "libx264" in (proc.stdout or ""),
+                "stderr_tail": (proc.stderr or "")[-500:],
+            }
+        except Exception as exc:
+            report["h264_debug"] = {"error": f"{type(exc).__name__}: {exc}"}
     print(json.dumps(report, ensure_ascii=False))
     # Grava o relatório num arquivo quando o build pedir (OFUSCADOR_SELFTEST_LOG). Um app
     # `--windowed` não tem console, então imprimir não basta para a CI ler o motivo.
