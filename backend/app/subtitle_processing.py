@@ -767,11 +767,12 @@ def remove_burned_subtitles_auto(
     progress: Callable[[float, str], None] | None = None,
     options: dict[str, object] | None = None,
 ) -> dict[str, float]:
-    """Modo AUTOMÁTICO "tela toda menos rosto" — a receita v2.4.1 validada na Colab,
-    rodando no PC com o motor ONNX do app. Sem desenhar caixa: apaga texto de QUALQUER cor
-    na tela inteira e protege o rosto. Duas passadas: 1) mapeia onde o rosto costuma ficar;
-    2) OCR quadro a quadro + união temporal + trava de tamanho (protege a Bíblia) + trava de
-    rosto (buraco fixo + rosto por quadro) + inpaint por componente."""
+    """Modo AUTOMÁTICO "tela toda menos rosto" — a receita validada na Colab (v2.5), rodando
+    no PC com o motor ONNX do app. Sem desenhar caixa: apaga texto de QUALQUER cor na tela
+    inteira e protege o rosto POR QUADRO (onde ele realmente está). Por quadro: OCR + união
+    temporal + trava de tamanho (protege a Bíblia) + trava de rosto por quadro + inpaint por
+    componente. (v2.5 removeu o "buraco fixo" — a união de rostos do vídeo INTEIRO virava uma
+    tarja no meio e protegia a legenda em vídeo multi-cena / tela dividida.)"""
     import cv2
     import numpy as np
     if bool(probe.get("hdr")):
@@ -790,23 +791,17 @@ def remove_burned_subtitles_auto(
         raise SubtitleRemovalError("O detector de texto (RapidOCR) não está disponível. Reinstale o pacote de IA para usar o modo automático.")
 
     if progress:
-        progress(0.0, "Mapeando onde fica o rosto")
+        progress(0.0, "Preparando remoção automática")
     cascade = _load_face_cascade(models)
     has_face = cascade is not None
-    facehits = np.zeros((height, width), np.float32)
-    samples = _scan_faces(source, probe, cascade, int(params["n_samp"]), facehits, height, width) if has_face else 0
-    if not has_face or samples <= 0:
-        # Sem detector de rosto (ou sem conseguir amostrar): protege a FAIXA DO MEIO por
-        # segurança, exatamente como a receita da Colab quando não há detector.
-        facehits[int(0.12 * height):int(0.60 * height), :] = 1.0
-        samples = 1
-    facefreq = facehits / max(1, samples)
-    face_zone = cv2.dilate(
-        (facefreq >= float(params["face_freq"])).astype(np.uint8),
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25)),
-    ) > 0
+    # v2.5: SEM buraco FIXO de rosto. A PASSA 1 antiga (união das posições de rosto do vídeo
+    # INTEIRO) virava uma tarja no MEIO em vídeo MULTI-CENA (várias pessoas / tela dividida) e
+    # PROTEGIA a legenda do meio -> ela sobrevivia. Agora o rosto é protegido SÓ por quadro
+    # (trava 2, onde ele realmente está). Só quando NÃO há detector de rosto é que caímos no
+    # antigo escudo da FAIXA DO MEIO, pra degradar com segurança sem apagar o rosto.
     allowed = np.ones((height, width), bool)
-    allowed[face_zone] = False
+    if not has_face:
+        allowed[int(0.12 * height):int(0.60 * height), :] = False
 
     dil = int(params["dil"])
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dil * 2 + 1, dil * 2 + 1)) if dil > 0 else None
@@ -829,7 +824,7 @@ def remove_burned_subtitles_auto(
             return frame
         if kernel is not None:
             mask = cv2.dilate(mask, kernel)
-        mask[~allowed] = 0                       # trava 1: buraco FIXO do rosto (PASSA 1)
+        mask[~allowed] = 0                       # só age SEM detector de rosto (escudo da faixa do meio)
         if has_face and mask.any():              # trava 2: rosto DESTE quadro
             dynamic = np.zeros((height, width), np.uint8)
             _stamp_face(dynamic, _face_rects(cascade, frame), height, width)
