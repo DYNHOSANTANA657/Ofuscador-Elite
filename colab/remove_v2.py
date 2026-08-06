@@ -1,14 +1,18 @@
-# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.6
+# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.7
 # Roda no runtime do Colab (auto-baixa LaMa, auto-instala rapidocr, auto-pede o video).
+#
+# v2.7 - SEM TRAVA DE TAMANHO (a pedido do usuario). Removi o MIN_TEXT_H: agora a legenda e
+#   apagada por MENOR que seja. Motivo: em video de baixa resolucao (ex. 360x516) a legenda tem
+#   so ~15-20px de altura e escapava da trava de 22px, sobrevivendo. ATENCAO: nao ha mais protecao
+#   de letra pequena, entao numero de versiculo da Biblia tambem pode ser apagado. Sobra so o
+#   MIN_AREA (ignora ruido de poucos pixels do detector; nunca bloqueia legenda, que tem area grande).
 #
 # v2.6 - SEM PROTECAO DE ROSTO/AREA (a pedido do usuario). NAO existe mais nenhuma regra que
 #   proteja o rosto ou qualquer regiao do video: a legenda e apagada em QUALQUER parte da tela,
 #   inclusive POR CIMA do rosto (videos cinematograficos em que o rosto passa em cima da legenda
 #   e depois desce). O resto continua IGUAL: deteccao de texto POR QUADRO (OCR DBNet, qualquer
-#   cor), uniao temporal curta (tira o pisca do karaoke) e LaMa por quadro. As unicas travas que
-#   ficam sao as do PROPRIO texto (NAO sao de area): MIN_TEXT_H (nao apaga letra muito pequena,
-#   ex. numero de versiculo da Biblia) e MIN_AREA (ignora ruido). Removi o detector de rosto Haar
-#   (face_cascade / face_rects / stamp_face) e a marcacao de rosto por quadro na PASSA 2.
+#   cor), uniao temporal curta (tira o pisca do karaoke) e LaMa por quadro. Removi o detector de
+#   rosto Haar (face_cascade / face_rects / stamp_face) e a marcacao de rosto por quadro na PASSA 2.
 #
 # v2.5 - (historico) tinha protecao de rosto SO por quadro (Haar na PASSA 2). Removida na v2.6.
 # v2.4.x - (historico) zona = tela toda menos um buraco FIXO do rosto. Substituido pela v2.5/v2.6.
@@ -20,7 +24,6 @@ from google.colab.patches import cv2_imshow
 # ---------------- parametros ----------------
 MAX_SEGUNDOS = 0        # 0 = video INTEIRO
 OCR_CADA     = 1        # OCR a cada N quadros. 1 = TODOS (pega o flash de 1 quadro). Mais lento.
-MIN_TEXT_H   = 22       # ALTURA minima da caixa de texto, em px. PROTEGE a Biblia (letra pequena)
 DIL          = 6        # dilatacao da mascara (engorda o texto p/ nao sobrar borda)
 TEMPORAL_W   = 3        # quantas deteccoes recentes de OCR unir (tira o pisca; curto p/ nao arrastar)
 MIN_AREA     = 60
@@ -61,7 +64,7 @@ def inpaint(bgr, mask):
     res = res * 255.0 if res.max() <= 1.5 else res
     return cv2.cvtColor(np.clip(res, 0, 255).astype('uint8')[:h, :w], cv2.COLOR_RGB2BGR)
 
-# ---------------- 3) detector de texto (com trava de TAMANHO) ----------------
+# ---------------- 3) detector de texto (sem trava de tamanho; so ignora ruido por MIN_AREA) ----------------
 try:
     from rapidocr_onnxruntime import RapidOCR
 except ImportError:
@@ -79,8 +82,7 @@ def boxes(img):
             a = np.asarray(it, dtype=np.float32)
             b = a if (a.ndim == 2 and a.shape == (4, 2)) else np.asarray(it[0], dtype=np.float32)
             if b.shape != (4, 2):                 continue
-            if cv2.contourArea(b) < MIN_AREA:      continue
-            if (b[:, 1].max() - b[:, 1].min()) < MIN_TEXT_H: continue   # trava: texto PEQUENO (Biblia) fica de fora
+            if cv2.contourArea(b) < MIN_AREA:      continue   # so ignora ruido minusculo; NAO ha mais trava de altura
             bs.append(b)
     return bs
 
