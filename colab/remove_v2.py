@@ -1,21 +1,17 @@
-# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.5
+# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.6
 # Roda no runtime do Colab (auto-baixa LaMa, auto-instala rapidocr, auto-pede o video).
 #
-# v2.5 - CONSERTO do bug de VIDEO MULTI-CENA (varias pessoas / TELA DIVIDIDA).
-#   A v2.4.x criava um "buraco FIXO do rosto" = uniao das posicoes de rosto do video INTEIRO
-#   (amostrando ~200 quadros). Em video de UMA cena isso funciona; mas em video de VARIAS cenas
-#   (uma pessoa numa hora, outra noutra, e TELA DIVIDIDA com 2 pessoas) essas posicoes se SOMAM e
-#   viram uma TARJA no MEIO da tela (chegava a ~48% da area). Legenda que cai nessa faixa (ex.:
-#   a legenda no meio da tela dividida, ou a legenda no peito) ficava DENTRO da zona protegida ->
-#   NAO era apagada. Esse era o motivo de "a legenda nao sai quando tem 2 pessoas / tela dividida".
-#   CONSERTO: acabou o buraco FIXO (e a PASSA 1 de amostragem). A protecao de rosto agora e SO por
-#   quadro (na PASSA 2), onde o rosto realmente esta -> legenda em QUALQUER lugar/altura pode ser
-#   apagada e o rosto/oculos seguem protegidos (validado em cena de mulher, homem e tela dividida).
+# v2.6 - SEM PROTECAO DE ROSTO/AREA (a pedido do usuario). NAO existe mais nenhuma regra que
+#   proteja o rosto ou qualquer regiao do video: a legenda e apagada em QUALQUER parte da tela,
+#   inclusive POR CIMA do rosto (videos cinematograficos em que o rosto passa em cima da legenda
+#   e depois desce). O resto continua IGUAL: deteccao de texto POR QUADRO (OCR DBNet, qualquer
+#   cor), uniao temporal curta (tira o pisca do karaoke) e LaMa por quadro. As unicas travas que
+#   ficam sao as do PROPRIO texto (NAO sao de area): MIN_TEXT_H (nao apaga letra muito pequena,
+#   ex. numero de versiculo da Biblia) e MIN_AREA (ignora ruido). Removi o detector de rosto Haar
+#   (face_cascade / face_rects / stamp_face) e a marcacao de rosto por quadro na PASSA 2.
 #
-# v2.4.1 / v2.4 - (historico) zona = tela toda menos um buraco FIXO do rosto. Substituido pela v2.5.
-#   Travas que permanecem: (1) TAMANHO (MIN_TEXT_H) protege a letra pequena (Biblia); (2) ROSTO
-#   detectado em CADA quadro (Haar) -> nunca apaga olhos/oculos. + OCR em TODOS os quadros
-#   (OCR_CADA=1) e UNIAO TEMPORAL curta (tira o pisca do karaoke).
+# v2.5 - (historico) tinha protecao de rosto SO por quadro (Haar na PASSA 2). Removida na v2.6.
+# v2.4.x - (historico) zona = tela toda menos um buraco FIXO do rosto. Substituido pela v2.5/v2.6.
 
 import os, glob, cv2, numpy as np, urllib.request, torch
 from collections import deque
@@ -96,36 +92,25 @@ W = int(cap.get(3)); H = int(cap.get(4))
 N = total if MAX_SEGUNDOS == 0 else min(total, int(MAX_SEGUNDOS * fps))
 print(f'{total} quadros no total; processando {N}; {W}x{H} @ {fps:.1f}', flush=True)
 
-# ---------------- 5) rosto: protecao SO por quadro (SEM buraco FIXO) ----------------
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-HAS_FACE = not face_cascade.empty()
-
-def face_rects(bgr):
-    if not HAS_FACE: return []
-    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    return face_cascade.detectMultiScale(g, 1.2, 5, minSize=(90, 90))   # rosto grande (menos falso-positivo)
-
-def stamp_face(dst, rects):                             # marca rosto: do cabelo ate o queixo
-    for (x, y, w, h) in rects:
-        y0 = max(0, y - int(0.20 * h)); y1 = min(H, y + int(1.00 * h))
-        x0 = max(0, x - int(0.20 * w)); x1 = min(W, x + int(1.20 * w))
-        dst[y0:y1, x0:x1] += 1
-
+# ---------------- 5) kernel + PREVIA (checkpoint do que SERA APAGADO) ----------------
+# SEM protecao de rosto/area: nao ha buraco nem zona verde. A previa mostra em VERMELHO o texto
+# detectado num quadro do meio = exatamente o que a PASSA 2 vai apagar (em qualquer parte da tela).
 ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (DIL * 2 + 1, DIL * 2 + 1))
-if not HAS_FACE:
-    print('AVISO: sem detector de rosto (Haar) -> o rosto NAO sera protegido.', flush=True)
 
-# PREVIA (checkpoint): mostra o rosto detectado num quadro do meio. Agora NAO ha mais tarja fixa
-# no meio -> legenda em qualquer altura sai; a protecao (verde) ACOMPANHA o rosto quadro a quadro.
 cap.set(1, N // 2); okp, midf = cap.read()
 if okp:
-    ov = midf.copy(); fm0 = np.zeros((H, W), np.uint8); stamp_face(fm0, face_rects(midf))
-    ov[fm0 > 0] = (0.4 * ov[fm0 > 0].astype(np.float32) + 0.6 * np.array([0, 255, 0], np.float32)).astype('uint8')
-    print('PREVIA: VERDE = rosto protegido NESTE quadro (a protecao acompanha o rosto quadro a')
-    print('quadro). Toda legenda FORA do verde sera apagada, em QUALQUER parte da tela:')
+    mm0 = np.zeros((H, W), np.uint8)
+    for b in boxes(midf):
+        cv2.fillPoly(mm0, [b.astype(np.int32)], 255)
+    if mm0.any():
+        mm0 = cv2.dilate(mm0, ker)
+    ov = midf.copy()
+    ov[mm0 > 0] = (0.4 * ov[mm0 > 0].astype(np.float32) + 0.6 * np.array([0, 0, 255], np.float32)).astype('uint8')
+    print('PREVIA: VERMELHO = texto que SERA apagado neste quadro. NAO ha protecao de rosto/area:')
+    print('a legenda sai em QUALQUER parte da tela, inclusive por cima do rosto.')
     cv2_imshow(ov)
 
-# ---------------- 6) PASSA 2: OCR (tela toda) + uniao temporal + protege rosto por quadro + LaMa ----
+# ---------------- 6) PASSA 2: OCR (tela toda) + uniao temporal + LaMa (SEM protecao) ----------------
 os.makedirs('v2out', exist_ok=True)
 cap.set(1, 0); feito = 0
 hist = deque(maxlen=TEMPORAL_W)                          # ultimas deteccoes (listas de caixas)
@@ -139,12 +124,7 @@ for i in range(N):
         for b in bs: cv2.fillPoly(mm, [b.astype(np.int32)], 255)
     if mm.any():
         mm = cv2.dilate(mm, ker)
-        if HAS_FACE:                                    # trava: rosto DESTE quadro (onde ele esta)
-            fm = np.zeros((H, W), np.uint8)
-            stamp_face(fm, face_rects(fr))
-            mm[fm > 0] = 0
-        if mm.any():
-            fr = inpaint(fr, mm)
+        fr = inpaint(fr, mm)                            # apaga em QUALQUER parte (rosto incluido)
     cv2.imwrite('v2out/%05d.png' % i, fr); feito += 1
     if (i + 1) % 50 == 0 or i == N - 1:
         print('  quadro', i + 1, '/', N, flush=True)
