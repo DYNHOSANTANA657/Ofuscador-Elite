@@ -1,22 +1,21 @@
-# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.4.1
+# remove_v2.py - Remove legenda/tarja QUEIMADA com LaMa (inpaint por quadro). v2.5
 # Roda no runtime do Colab (auto-baixa LaMa, auto-instala rapidocr, auto-pede o video).
 #
-# v2.4.1 - conserto do buraco do rosto: na v2.4 o Haar dava falso-positivo no colarinho/
-#   gravata e o buraco protegido cobria o PEITO todo (legenda do peito nao seria apagada).
-#   Agora o buraco FIXO exige FACE_FREQ alto (0.30) E rosto na METADE DE CIMA -> buraco so
-#   no rosto principal; peito/meio/rodape ficam apagaveis. Rosto de baixo (tela dividida)
-#   segue protegido pela trava DINAMICA por quadro.
+# v2.5 - CONSERTO do bug de VIDEO MULTI-CENA (varias pessoas / TELA DIVIDIDA).
+#   A v2.4.x criava um "buraco FIXO do rosto" = uniao das posicoes de rosto do video INTEIRO
+#   (amostrando ~200 quadros). Em video de UMA cena isso funciona; mas em video de VARIAS cenas
+#   (uma pessoa numa hora, outra noutra, e TELA DIVIDIDA com 2 pessoas) essas posicoes se SOMAM e
+#   viram uma TARJA no MEIO da tela (chegava a ~48% da area). Legenda que cai nessa faixa (ex.:
+#   a legenda no meio da tela dividida, ou a legenda no peito) ficava DENTRO da zona protegida ->
+#   NAO era apagada. Esse era o motivo de "a legenda nao sai quando tem 2 pessoas / tela dividida".
+#   CONSERTO: acabou o buraco FIXO (e a PASSA 1 de amostragem). A protecao de rosto agora e SO por
+#   quadro (na PASSA 2), onde o rosto realmente esta -> legenda em QUALQUER lugar/altura pode ser
+#   apagada e o rosto/oculos seguem protegidos (validado em cena de mulher, homem e tela dividida).
 #
-# v2.4 - TELA TODA DE VERDADE (mata o "flash" da legenda no meio).
-#   A zona vermelha agora e a TELA INTEIRA (cima+meio+baixo), MENOS um buraco no ROSTO.
-#   Assim, se a legenda saltar pro meio por 1 quadro so, ela cai DENTRO da zona e some.
-#   O que impede apagar a coisa errada:
-#     (1) TAMANHO - so apaga caixa de texto ALTA (legenda tem letra grande; a letrinha
-#                   da Biblia e pequena -> fica protegida).                    [MIN_TEXT_H]
-#     (2) ROSTO   - 2 travas: um buraco fixo no rosto (achado na PASSA 1) + deteccao de
-#                   rosto em CADA quadro na PASSA 2 -> NUNCA apaga olhos/oculos.
-#   + OCR em TODOS os quadros (OCR_CADA=1) -> nao perde o flash de 1 quadro.
-#   + UNIAO TEMPORAL curta: a mascara "gruda" alguns quadros -> tira o pisca do karaoke.
+# v2.4.1 / v2.4 - (historico) zona = tela toda menos um buraco FIXO do rosto. Substituido pela v2.5.
+#   Travas que permanecem: (1) TAMANHO (MIN_TEXT_H) protege a letra pequena (Biblia); (2) ROSTO
+#   detectado em CADA quadro (Haar) -> nunca apaga olhos/oculos. + OCR em TODOS os quadros
+#   (OCR_CADA=1) e UNIAO TEMPORAL curta (tira o pisca do karaoke).
 
 import os, glob, cv2, numpy as np, urllib.request, torch
 from collections import deque
@@ -29,8 +28,6 @@ MIN_TEXT_H   = 22       # ALTURA minima da caixa de texto, em px. PROTEGE a Bibl
 DIL          = 6        # dilatacao da mascara (engorda o texto p/ nao sobrar borda)
 TEMPORAL_W   = 3        # quantas deteccoes recentes de OCR unir (tira o pisca; curto p/ nao arrastar)
 MIN_AREA     = 60
-N_SAMP       = 200      # amostras na PASSA 1 (agora so p/ mapear onde o ROSTO fica; rapido, sem OCR)
-FACE_FREQ    = 0.30     # fracao das amostras p/ virar "rosto FIXO" protegido (ALTO = so o rosto principal; ignora falso-positivo esporadico no colarinho/gravata)
 MODEL_URL    = 'https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt'
 
 # ---------------- 1) video ----------------
@@ -99,9 +96,7 @@ W = int(cap.get(3)); H = int(cap.get(4))
 N = total if MAX_SEGUNDOS == 0 else min(total, int(MAX_SEGUNDOS * fps))
 print(f'{total} quadros no total; processando {N}; {W}x{H} @ {fps:.1f}', flush=True)
 
-# ---------------- 5) PASSA 1: mapeia onde fica o ROSTO (rapido, SEM OCR) --------------
-# A zona agora e a TELA TODA menos o rosto, entao a PASSA 1 so precisa saber ONDE o rosto
-# aparece p/ nunca apaga-lo. Sem OCR aqui -> bem mais rapida que antes.
+# ---------------- 5) rosto: protecao SO por quadro (SEM buraco FIXO) ----------------
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 HAS_FACE = not face_cascade.empty()
 
@@ -110,43 +105,27 @@ def face_rects(bgr):
     g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
     return face_cascade.detectMultiScale(g, 1.2, 5, minSize=(90, 90))   # rosto grande (menos falso-positivo)
 
-def stamp_face(dst, rects, only_upper=False):           # marca rosto: do cabelo ate o queixo
+def stamp_face(dst, rects):                             # marca rosto: do cabelo ate o queixo
     for (x, y, w, h) in rects:
-        if only_upper and (y + 0.5 * h) > 0.50 * H:     # buraco FIXO: so rosto na METADE DE CIMA
-            continue                                    # (colarinho/gravata detectado como "rosto" fica de fora)
         y0 = max(0, y - int(0.20 * h)); y1 = min(H, y + int(1.00 * h))
         x0 = max(0, x - int(0.20 * w)); x1 = min(W, x + int(1.20 * w))
         dst[y0:y1, x0:x1] += 1
 
-facehits = np.zeros((H, W), np.float32)
-samp = np.unique(np.linspace(0, N - 1, min(N_SAMP, N)).astype(int))
-last = None
-for i in samp:
-    cap.set(1, int(i)); ok, fr = cap.read()
-    if not ok: continue
-    last = fr
-    stamp_face(facehits, face_rects(fr), only_upper=True)   # buraco FIXO: so rosto de cima
-facefreq = facehits / max(1, len(samp))
-if not HAS_FACE:
-    print('AVISO: sem detector de rosto -> protegendo o MEIO por seguranca', flush=True)
-    facefreq[int(0.12 * H):int(0.60 * H), :] = 1.0
-
-# ZONA = TELA TODA, menos um buraco no ROSTO.
-face_zone = cv2.dilate((facefreq >= FACE_FREQ).astype(np.uint8),
-                       cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))) > 0
-zb = np.ones((H, W), bool)
-zb[face_zone] = False                                   # NUNCA apaga o rosto (olhos/oculos)
-print(f'ZONA: TELA TODA menos o rosto | rosto protegido: {int(face_zone.sum())} px ({100.0*face_zone.sum()/(H*W):.1f}%)', flush=True)
 ker = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (DIL * 2 + 1, DIL * 2 + 1))
+if not HAS_FACE:
+    print('AVISO: sem detector de rosto (Haar) -> o rosto NAO sera protegido.', flush=True)
 
-if last is not None:
-    ov = last.copy()
-    ov[zb] = (0.4 * ov[zb].astype(np.float32) + 0.6 * np.array([0, 0, 255], np.float32)).astype('uint8')
-    print('PREVIA: VERMELHO = onde pode apagar legenda (TELA TODA). O BURACO sem vermelho e o seu')
-    print('ROSTO. Confira que rosto/oculos ficam FORA do vermelho antes de deixar rodar:')
+# PREVIA (checkpoint): mostra o rosto detectado num quadro do meio. Agora NAO ha mais tarja fixa
+# no meio -> legenda em qualquer altura sai; a protecao (verde) ACOMPANHA o rosto quadro a quadro.
+cap.set(1, N // 2); okp, midf = cap.read()
+if okp:
+    ov = midf.copy(); fm0 = np.zeros((H, W), np.uint8); stamp_face(fm0, face_rects(midf))
+    ov[fm0 > 0] = (0.4 * ov[fm0 > 0].astype(np.float32) + 0.6 * np.array([0, 255, 0], np.float32)).astype('uint8')
+    print('PREVIA: VERDE = rosto protegido NESTE quadro (a protecao acompanha o rosto quadro a')
+    print('quadro). Toda legenda FORA do verde sera apagada, em QUALQUER parte da tela:')
     cv2_imshow(ov)
 
-# ---------------- 6) PASSA 2: OCR (tela toda) + uniao temporal + protege rosto + LaMa ----
+# ---------------- 6) PASSA 2: OCR (tela toda) + uniao temporal + protege rosto por quadro + LaMa ----
 os.makedirs('v2out', exist_ok=True)
 cap.set(1, 0); feito = 0
 hist = deque(maxlen=TEMPORAL_W)                          # ultimas deteccoes (listas de caixas)
@@ -160,8 +139,7 @@ for i in range(N):
         for b in bs: cv2.fillPoly(mm, [b.astype(np.int32)], 255)
     if mm.any():
         mm = cv2.dilate(mm, ker)
-        mm[~zb] = 0                                     # trava 1: buraco FIXO do rosto
-        if HAS_FACE and mm.any():                       # trava 2: rosto DESTE quadro (dinamica)
+        if HAS_FACE:                                    # trava: rosto DESTE quadro (onde ele esta)
             fm = np.zeros((H, W), np.uint8)
             stamp_face(fm, face_rects(fr))
             mm[fm > 0] = 0
