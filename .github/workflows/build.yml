@@ -126,3 +126,41 @@ jobs:
             dist/OfuscadorElite-macOS-*.zip
             dist/SHA256SUMS.txt
           retention-days: 14
+
+  release:
+    # Só publica quando o gatilho é uma tag v* (não roda no workflow_dispatch de teste).
+    # Junta os ZIPs de Windows e macOS num único GitHub Release para o usuário baixar
+    # sem precisar entrar na aba Actions (os artifacts expiram em 14 dias; o Release fica).
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Juntar os arquivos e recriar os checksums
+        run: |
+          mkdir -p release
+          find artifacts -name '*.zip' -exec cp -n {} release/ \;
+          cd release
+          sha256sum *.zip > SHA256SUMS.txt
+          echo "--- Conteúdo do Release ---"
+          ls -la
+
+      - name: Publicar o GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd release
+          tag="${{ github.ref_name }}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" *.zip SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$tag" *.zip SHA256SUMS.txt \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Ofuscador Elite $tag" \
+              --generate-notes
+          fi

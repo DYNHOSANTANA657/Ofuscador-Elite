@@ -44,12 +44,23 @@ REMOÇÃO LOCAL DE LEGENDAS
 - Escolha Áudio, Legendas ou Áudio + legendas depois de selecionar o vídeo.
 - Faixas de legenda separadas são removidas sem recodificar vídeo ou áudio.
 - Para legenda gravada na imagem, instale uma vez o pacote gratuito
-  OfuscadorElite-IA-Legendas-v1.zip, examine o vídeo, revise as caixas e gere a prévia.
+  OfuscadorElite-IA-Legendas-v1.zip (ou importe o ZIP manualmente sem internet).
+
+MODO AUTOMÁTICO (recomendado) — legenda gravada na imagem
+- É a mesma receita testada no Colab, agora rodando no seu computador.
+- Encontra a legenda de qualquer cor pela forma das letras, apaga o texto na tela
+  inteira (rodapé e topo) e protege o rosto automaticamente. Você não desenha nada:
+  marque "Apagar legenda gravada na imagem", deixe em "Automático" e clique em Processar.
+- Sem uma placa de vídeo forte ele é LENTO, pois analisa quadro a quadro. Em vídeo
+  longo pode demorar bastante. O resultado é o mesmo do Colab, só mais devagar.
+
+MODO DESENHAR CAIXA (avançado)
+- Examine o vídeo, revise as caixas detectadas pelo OCR e gere a prévia antes de processar.
 - A análise usa RapidOCR e a reconstrução usa quadros vizinhos e LaMa no computador.
-- Também é possível importar o ZIP de IA manualmente quando não houver internet.
-- Vídeo HDR é bloqueado para remoção gravada nesta primeira versão.
+
+- Vídeo HDR é bloqueado para remoção gravada nesta versão.
 - Vídeo VFR é convertido para FPS constante equivalente somente quando a imagem precisa
-  ser reconstruída. A resolução é mantida e o vídeo é codificado em H.264 CRF 16.
+  ser reconstruída. A resolução é mantida e o vídeo é recodificado em H.264.
 - A IA estima o fundo oculto; ela não pode recuperar exatamente pixels que não existem.
 - Se o modelo falhar, o aplicativo interrompe sem usar borrão ou corte escondido.
 
