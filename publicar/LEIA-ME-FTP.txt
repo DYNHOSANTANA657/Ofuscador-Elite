@@ -49,13 +49,13 @@ consegue usar "Importar ZIP". Para ligar, reconstrua o pacote assim:
   .\build-windows.ps1 `
     -PythonPath C:\Users\edeni\Python312\python.exe `
     -SubtitleModelUrl "https://SEU-DOMINIO/arquivos/OfuscadorElite-IA-Legendas-v1.zip" `
-    -SubtitleModelSha256 "E655D34870D18A1F6535A61D14C93D807A982CCA8DE78231B2135149D9C6774D"
+    -SubtitleModelSha256 "6E31EBDA7A85D5228025F0AE393A92E7B5D4AA5D9D39857B8A28EBF2C0C8F189"
 
 No macOS as mesmas informações vão em variáveis de ambiente antes de rodar
 ./build-macos.command:
 
   export OFUSCADOR_SUBTITLE_MODEL_URL="https://SEU-DOMINIO/arquivos/OfuscadorElite-IA-Legendas-v1.zip"
-  export OFUSCADOR_SUBTITLE_MODEL_SHA256="E655D348...774D"
+  export OFUSCADOR_SUBTITLE_MODEL_SHA256="6E31EBDA...F189"
 
 O aplicativo só aceita a instalação online quando os dois valores estão
 presentes e o SHA-256 do arquivo baixado bate exatamente com o configurado.
